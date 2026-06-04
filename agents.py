@@ -8,41 +8,9 @@ from state import MappingResponse, ColumnMapping
 load_dotenv()
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
+# ─── mapping prompt ──────────────────────────────────────────────
 
-def fingerprint_source(state):
-    rows = read_file(state["source_path"], state.get("sheet_name"))
-    headers, _ = get_headers_and_data(rows)
-    fp = fingerprint_headers(headers)
-    cached = load_cached_mapping(fp)
-    state["fingerprint"] = fp
-    state["headers"] = headers
-    state["is_known_schema"] = cached is not None
-    state["mapping"] = cached if cached else []
-    return state
-
-
-def profile_source(state):
-    rows = read_file(state["source_path"], state.get("sheet_name"))
-    headers, data = get_headers_and_data(rows)
-    state["headers"] = headers
-    state["profiles"] = profile_columns(headers, data)
-    state["row_count"] = len(data)
-    state["sample_rows"] = [dict(zip(headers, row)) for row in data[:5]]
-    state["category_hierarchy"] = detect_category_sheets(state["source_path"])
-    return state
-
-
-def map_columns(state):
-    if state["is_known_schema"]:
-        return state
-
-    profile_text = json.dumps(state["profiles"], indent=2)
-    sample_text = json.dumps(state.get("sample_rows", [])[:3], indent=2)
-
-    profile_text = json.dumps(state["profiles"], indent=2)
-    sample_text = json.dumps(state.get("sample_rows", [])[:3], indent=2)
-
-    prompt = f"""You are a PIM data mapping expert. Map each source column to a PIM attribute.
+MAPPING_PROMPT_TEMPLATE = """You are a PIM data mapping expert. Map each source column to a PIM attribute.
 
 Return a JSON object with key "mappings" containing an array of objects.
 Each object has these fields:
@@ -88,21 +56,37 @@ Source columns with stats:
 Sample rows:
 {sample_text}"""
 
+# ─── small helpers ───────────────────────────────────────────────
+
+def build_mapping_prompt(profiles, sample_rows):
+    return MAPPING_PROMPT_TEMPLATE.format(
+        profile_text=json.dumps(profiles, indent=2),
+        sample_text=json.dumps(sample_rows[:3], indent=2)
+    )
+
+
+def call_llm(prompt):
     response = client.models.generate_content(
         model="gemini-2.5-flash-lite",
         contents=prompt,
         config={"response_mime_type": "application/json"}
     )
-    result = json.loads(response.text)
+    return json.loads(response.text)
 
-    if isinstance(result, list):
-        raw = result
-    elif isinstance(result, dict):
-        raw = result.get("mappings", result.get("attributes", result.get("columns", [])))
-    else:
-        raise ValueError(f"Unexpected LLM response: {type(result)}")
 
-    def normalize(m):
+def parse_mapping_response(raw):
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, dict):
+        for key in ("mappings", "attributes", "columns"):
+            if key in raw and isinstance(raw[key], list):
+                return raw[key]
+    raise ValueError(f"Cannot extract mappings from: {type(raw)}")
+
+
+def normalize_mapping(raw_list):
+    result = []
+    for m in raw_list:
         src = m.get("source_column", "")
         target = m.pop("target", m.get("target_attribute", src))
         target = target.lower().replace(" ", "_").replace("-", "_")
@@ -111,13 +95,61 @@ Sample rows:
         m["attribute_type"] = m.pop("type", m.get("attribute_type", "Textbox"))
         m["attribute_data_type"] = m.pop("data_type", m.get("attribute_data_type", "varchar"))
         m["attribute_group"] = m.pop("group", m.get("attribute_group", "Basic Information"))
-        return m
+        result.append(m)
+    return result
 
-    parsed = MappingResponse(mappings=[ColumnMapping(**normalize(m)) for m in raw])
+
+def validate_mapping(raw_list):
+    return MappingResponse(mappings=[ColumnMapping(**m) for m in raw_list])
+
+
+def cache_mapping(fingerprint, mappings):
+    save_cached_mapping(fingerprint, [m.model_dump() for m in mappings])
+
+
+def avg_confidence(mappings):
+    if not mappings:
+        return 0.0
+    return sum(m.confidence for m in mappings) / len(mappings)
+
+# ─── node functions ──────────────────────────────────────────────
+
+def fingerprint_source(state):
+    rows = read_file(state["source_path"], state.get("sheet_name"))
+    headers, _ = get_headers_and_data(rows)
+    fp = fingerprint_headers(headers)
+    cached = load_cached_mapping(fp)
+    state["fingerprint"] = fp
+    state["headers"] = headers
+    state["is_known_schema"] = cached is not None
+    state["mapping"] = cached if cached else []
+    return state
+
+
+def profile_source(state):
+    rows = read_file(state["source_path"], state.get("sheet_name"))
+    headers, data = get_headers_and_data(rows)
+    state["headers"] = headers
+    state["profiles"] = profile_columns(headers, data)
+    state["row_count"] = len(data)
+    state["sample_rows"] = [dict(zip(headers, row)) for row in data[:5]]
+    state["category_hierarchy"] = detect_category_sheets(state["source_path"])
+    return state
+
+
+def map_columns(state):
+    if state["is_known_schema"]:
+        return state
+
+    prompt = build_mapping_prompt(state["profiles"], state.get("sample_rows", []))
+    raw = call_llm(prompt)
+    extracted = parse_mapping_response(raw)
+    normalized = normalize_mapping(extracted)
+    parsed = validate_mapping(normalized)
+
     state["mapping"] = parsed.mappings
-    confs = [m.confidence for m in parsed.mappings]
-    state["mapping_requires_review"] = (sum(confs) / len(confs)) < 0.75 if confs else True
-    save_cached_mapping(state["fingerprint"], [m.model_dump() for m in parsed.mappings])
+    state["mapping_requires_review"] = avg_confidence(parsed.mappings) < 0.75
+    cache_mapping(state["fingerprint"], parsed.mappings)
     return state
 
 
@@ -165,20 +197,13 @@ def build_attributes(state):
 
 def collect_references(state):
     refs = {}
-    rows = read_file(state["source_path"], state.get("sheet_name"))
-    headers, data = get_headers_and_data(rows)
-
     for m in state["mapping"]:
         if m.attribute_type not in ("Dropdown", "MultiSelect"):
             continue
-        if m.source_column in headers:
-            idx = headers.index(m.source_column)
-            vals = set()
-            for row in data:
-                if idx < len(row) and row[idx] is not None and str(row[idx]).strip():
-                    vals.add(str(row[idx]).strip())
+        profile = next((p for p in state["profiles"] if p["name"] == m.source_column), None)
+        if profile and profile.get("unique_values"):
             master_key = f"{m.target_attribute.replace('_', ' ').title()} Master"
-            refs[master_key] = sorted(vals)
+            refs[master_key] = sorted(profile["unique_values"])
 
     state["reference_values"] = refs
     return state
@@ -190,18 +215,18 @@ def fill_templates(state):
     files = {}
 
     if state.get("category_hierarchy"):
-        wb = fill_category(state["category_hierarchy"])
+        wb = render_category_xlsx(state["category_hierarchy"])
         wb.save(f"output/{fp}_category.xlsx")
         wb.close()
         files["category"] = f"output/{fp}_category.xlsx"
 
-    wb = fill_attribute(state["attribute_definitions"])
+    wb = render_attribute_xlsx(state["attribute_definitions"])
     wb.save(f"output/{fp}_attribute.xlsx")
     wb.close()
     files["attribute"] = f"output/{fp}_attribute.xlsx"
 
     if state.get("reference_values"):
-        wb = fill_reference(state["reference_values"])
+        wb = render_reference_xlsx(state["reference_values"])
         wb.save(f"output/{fp}_reference.xlsx")
         wb.close()
         files["reference"] = f"output/{fp}_reference.xlsx"
@@ -210,8 +235,10 @@ def fill_templates(state):
     headers, data = get_headers_and_data(rows)
     img_cols = [h for h in headers if any(k in h.lower() for k in ("image", "img", "picture", "photo"))]
     mapping_list = [{"source_column": m.source_column, "target_attribute": m.target_attribute} for m in state["mapping"]]
+    attr_names = [m.get("target_attribute", m.get("source_column")) for m in mapping_list]
 
-    wb = fill_product(headers, data, mapping_list, img_cols)
+    product_rows = build_product_rows(headers, data, mapping_list, img_cols)
+    wb = render_product_xlsx(product_rows, attr_names)
     wb.save(f"output/{fp}_product.xlsx")
     wb.close()
     files["product"] = f"output/{fp}_product.xlsx"

@@ -61,7 +61,8 @@ def profile_columns(headers, data):
             "name": h,
             "non_null": len(vals),
             "unique": len(uniq),
-            "sample": sample
+            "sample": sample,
+            "unique_values": uniq if len(uniq) <= 100 else []
         })
     return profiles
 
@@ -85,7 +86,45 @@ def detect_category_sheets(path):
     return sorted(set(hierarchy))
 
 
-def fill_category(paths):
+def build_product_rows(headers, data, mapping, image_cols):
+    attr_names = [m.get("target_attribute", m.get("source_column")) for m in mapping]
+
+    code_col = next((h for h in headers if h.lower() in ("code", "item code", "sku")), None)
+    name_col = next((h for h in headers if h.lower() in ("product name", "item name", "sku name", "name", "title")), None)
+    mrp_col = next((h for h in headers if h.lower() in ("mrp", "price", "retail price", "price retail")), None)
+    cat_col = next((h for h in headers if "category" in h.lower()), None)
+
+    rows = []
+    for row in data:
+        record = {}
+        if cat_col and headers.index(cat_col) < len(row):
+            record["category_path"] = row[headers.index(cat_col)]
+        if code_col and headers.index(code_col) < len(row):
+            record["code"] = row[headers.index(code_col)]
+        if name_col and headers.index(name_col) < len(row):
+            record["sku_name"] = row[headers.index(name_col)]
+        if mrp_col and headers.index(mrp_col) < len(row):
+            record["mrp"] = row[headers.index(mrp_col)]
+
+        for m in mapping:
+            src = m.get("source_column")
+            tgt = m.get("target_attribute", src)
+            if src and src in headers:
+                idx = headers.index(src)
+                if idx < len(row):
+                    record[tgt] = row[idx]
+
+        for ii, ic in enumerate(image_cols[:9]):
+            if ic in headers:
+                idx = headers.index(ic)
+                if idx < len(row):
+                    record[f"image_{ii + 1}"] = row[idx]
+
+        rows.append(record)
+    return rows
+
+
+def render_category_xlsx(paths):
     wb = Workbook()
     ws = wb.active
     ws["A1"] = "Category Path"
@@ -94,7 +133,7 @@ def fill_category(paths):
     return wb
 
 
-def fill_attribute(defs):
+def render_attribute_xlsx(defs):
     wb = Workbook()
     ws = wb.active
     cols = [
@@ -114,7 +153,7 @@ def fill_attribute(defs):
     return wb
 
 
-def fill_reference(refs):
+def render_reference_xlsx(refs):
     wb = Workbook()
     ws = wb.active
     ws["A1"] = "Reference Master"
@@ -128,7 +167,7 @@ def fill_reference(refs):
     return wb
 
 
-def fill_product(headers, data, mapping, image_cols):
+def render_product_xlsx(rows, attr_names):
     wb = Workbook()
     ws = wb.active
     ws["A1"] = "Category Path"
@@ -138,44 +177,24 @@ def fill_product(headers, data, mapping, image_cols):
     ws["E1"] = "sku_name"
     ws["F1"] = "mrp"
 
-    attr_names = [m.get("target_attribute", m.get("source_column")) for m in mapping]
     for i, name in enumerate(attr_names, 7):
         ws.cell(row=1, column=i, value=name)
 
     for i in range(1, 10):
         ws.cell(row=1, column=6 + len(attr_names) + i, value=f"image_{i}")
 
-    code_col = next((h for h in headers if h.lower() in ("code", "item code", "sku")), None)
-    name_col = next((h for h in headers if h.lower() in ("product name", "item name", "sku name", "name", "title")), None)
-    mrp_col = next((h for h in headers if h.lower() in ("mrp", "price", "retail price", "price retail")), None)
-    cat_col = next((h for h in headers if "category" in h.lower()), None)
+    for ri, record in enumerate(rows, 2):
+        ws.cell(row=ri, column=1, value=record.get("category_path"))
+        ws.cell(row=ri, column=4, value=record.get("code"))
+        ws.cell(row=ri, column=5, value=record.get("sku_name"))
+        ws.cell(row=ri, column=6, value=record.get("mrp"))
 
-    for ri, row in enumerate(data, 2):
-        if code_col:
-            idx = headers.index(code_col)
-            ws.cell(row=ri, column=4, value=row[idx] if idx < len(row) else "")
-        if name_col:
-            idx = headers.index(name_col)
-            ws.cell(row=ri, column=5, value=row[idx] if idx < len(row) else "")
-        if mrp_col:
-            idx = headers.index(mrp_col)
-            ws.cell(row=ri, column=6, value=row[idx] if idx < len(row) else "")
-        if cat_col:
-            idx = headers.index(cat_col)
-            ws.cell(row=ri, column=1, value=row[idx] if idx < len(row) else "")
+        for ci, name in enumerate(attr_names, 7):
+            ws.cell(row=ri, column=ci, value=record.get(name))
 
-        for mi, m in enumerate(mapping):
-            src = m.get("source_column")
-            tgt = m.get("target_attribute", src)
-            if src in headers:
-                idx = headers.index(src)
-                col = 7 + attr_names.index(tgt) if tgt in attr_names else -1
-                if col > 0:
-                    ws.cell(row=ri, column=col, value=row[idx] if idx < len(row) else "")
-
-        for ii, ic in enumerate(image_cols[:9]):
-            if ic in headers:
-                idx = headers.index(ic)
-                ws.cell(row=ri, column=6 + len(attr_names) + ii + 1, value=row[idx] if idx < len(row) else "")
+        for ii in range(1, 10):
+            key = f"image_{ii}"
+            if key in record:
+                ws.cell(row=ri, column=6 + len(attr_names) + ii, value=record[key])
 
     return wb
