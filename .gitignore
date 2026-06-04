@@ -1,0 +1,7 @@
+client-data/
+cache/
+output/
+.env
+__pycache__/
+*.pyc
+.reasonix/
