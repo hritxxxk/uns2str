@@ -122,7 +122,10 @@ def fingerprint_source(state):
     state["fingerprint"] = fp
     state["headers"] = headers
     state["is_known_schema"] = cached is not None
-    state["mapping"] = cached if cached else []
+    if cached:
+        state["mapping"] = [ColumnMapping(**m) for m in cached]
+    else:
+        state["mapping"] = []
     return state
 
 
