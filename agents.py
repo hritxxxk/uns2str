@@ -39,23 +39,50 @@ def map_columns(state):
     profile_text = json.dumps(state["profiles"], indent=2)
     sample_text = json.dumps(state.get("sample_rows", [])[:3], indent=2)
 
-    prompt = f"""Map each source column to a PIM attribute.
+    profile_text = json.dumps(state["profiles"], indent=2)
+    sample_text = json.dumps(state.get("sample_rows", [])[:3], indent=2)
 
-Use your eCommerce knowledge:
-- SKU, ID, Code fields → Textbox, varchar, mandatory, not constrained
-- Brand, Category, Colour, Size, Gender, Season, Status → Dropdown, varchar, constrained
-- Product name / title → Textbox, varchar, mandatory
-- Description → RichText, varchar, length 65536
-- MRP, price, cost → Textbox, float
-- Items included, highlights, care instructions → Textarea, varchar, length 16384
-- Tags, features, materials → MultiSelect, varchar, constrained
-- Date fields → Date, date
-- Image URLs → Textbox, varchar, length 2048
+    prompt = f"""You are a PIM data mapping expert. Map each source column to a PIM attribute.
 
-Set constraint=true ONLY for attributes with predefined selectable values.
-Set mandatory=true ONLY for product identity or legally required fields.
+Return a JSON object with key "mappings" containing an array of objects.
+Each object has these fields:
+  source_column (str): original column name
+  target_attribute (str): snake_case PIM attribute name
+  attribute_type (str): Textbox | Dropdown | RichText | Textarea | MultiSelect | Date | Time
+  attribute_data_type (str): varchar | int | float | boolean | date
+  constraint (bool): true only if dropdown or multiselect
+  length (int): max characters
+  mandatory (bool): true for identity or legal fields
+  attribute_group (str): e.g. "Product Identification", "Pricing", "Classification", "Media", "Technical Specs", "Brand & Origin"
+  confidence (float): 0.0 to 1.0
 
-Source columns:
+RULES:
+
+1. target_attribute must be snake_case — e.g. "product_name", "item_code", "mrp", "colour", "brand", "gender", "size", "image_url". Do NOT copy source column names as-is. Convert: "ITEM CODE" → "item_code", "ITEM NAME" → "product_name", "MRP" → "mrp", "BRAND" → "brand".
+
+2. Use column semantics + stats to decide attribute_type:
+   - If column is named "sku", "code", "id" → Textbox, varchar, mandatory=true
+   - If column has few unique values relative to total rows and means brand/colour/size/gender/season/type/category → Dropdown, constraint=true
+   - If column contains product name/title/description → Textbox or RichText, mandatory=true
+   - If column contains price/cost/mrp → Textbox, float
+   - If column contains image/photo/img → Textbox, varchar, length=2048
+   - If column contains date → Date, date
+   - If column contains tags/features/material → MultiSelect, constraint=true
+
+3. constraint=true ONLY for attributes where users pick from a predefined list (brand, colour, size, gender, season, status, category, type, material).
+
+4. mandatory=true ONLY for: sku, code, product_name, mrp (identity and pricing fields).
+
+5. attribute_group examples:
+   - "Product Identification": code, sku, gtin, hsn
+   - "Pricing": mrp, price, cost
+   - "Classification": category, type, gender, season, brand
+   - "Technical Specs": material, fabric, weight, dimensions
+   - "Media": image_url, video_url
+   - "Brand & Origin": brand, manufacturer, country_of_origin
+   - "Shipping": weight, length, width, height
+
+Source columns with stats:
 {profile_text}
 
 Sample rows:
