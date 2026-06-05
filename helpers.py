@@ -25,16 +25,29 @@ def save_cached_mapping(fp, data):
 
 
 def read_file(path, sheet_name=None):
+    # CSV is plain text — read with csv module directly
     ext = os.path.splitext(path)[1].lower()
     if ext == ".csv":
         with open(path, encoding="utf-8-sig") as f:
             reader = csv.reader(f)
             rows = [row for row in reader]
         return rows
-    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
-    ws = wb[sheet_name] if sheet_name else wb.active
-    rows = [list(row) for row in ws.iter_rows(values_only=True)]
-    wb.close()
+
+    # Modern .xlsx is a zip file — openpyxl handles it
+    try:
+        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+        ws = wb[sheet_name] if sheet_name else wb.active
+        rows = [list(row) for row in ws.iter_rows(values_only=True)]
+        wb.close()
+        return rows
+    except Exception:
+        pass
+
+    # Old .xls is an OLE container — xlrd handles it
+    import xlrd
+    wb = xlrd.open_workbook(path)
+    ws = wb.sheet_by_name(sheet_name) if sheet_name else wb.sheet_by_index(0)
+    rows = [[ws.cell_value(r, c) for c in range(ws.ncols)] for r in range(ws.nrows)]
     return rows
 
 
