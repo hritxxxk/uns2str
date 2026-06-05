@@ -268,7 +268,7 @@ Candidates:
 def _strategy_level_columns(state):
     headers = state.get("headers", [])
     level_cols = [i for i, h in enumerate(headers)
-                  if any(k in h.lower() for k in ("categor", "l1", "l2", "l3", "l4", "level", "silo", "commodity"))
+                  if any(k in h.lower() for k in ("categor", "sub", "product type", "l1", "l2", "l3", "l4", "level", "silo", "commodity", "division", "department", "gender"))
                   and "code" not in h.lower() and "id" not in h.lower()]
     if len(level_cols) < 2:
         return None
