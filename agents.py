@@ -1,14 +1,17 @@
 import os
 import json
+import openpyxl
 from dotenv import load_dotenv
 from google import genai
 from helpers import *
 from state import MappingResponse, ColumnMapping
+from tools.profiling import detect_data_sheet, profile_columns, detect_category_structure
+from tools.mapping import normalize_mapping, validate_mapping, build_attribute_definitions
+from tools.references import extract_reference_values
+from tools.rendering import render_category_xlsx, render_attribute_xlsx, render_reference_xlsx, render_product_xlsx
 
 load_dotenv()
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-
-# ─── mapping prompt ──────────────────────────────────────────────
 
 MAPPING_PROMPT_TEMPLATE = """You are a PIM data mapping expert. Map each source column to a PIM attribute.
 
@@ -26,37 +29,27 @@ Each object has these fields:
 
 RULES:
 
-1. target_attribute must be snake_case — e.g. "product_name", "item_code", "mrp", "colour", "brand", "gender", "size", "image_url". Do NOT copy source column names as-is. Convert: "ITEM CODE" → "item_code", "ITEM NAME" → "product_name", "MRP" → "mrp", "BRAND" → "brand".
+1. target_attribute must be snake_case — e.g. "product_name", "item_code", "mrp", "colour", "brand", "gender", "size", "image_url". Do NOT copy source column names as-is.
 
 2. Use column semantics + stats to decide attribute_type:
-   - If column is named "sku", "code", "id" → Textbox, varchar, mandatory=true
-   - If column has few unique values relative to total rows and means brand/colour/size/gender/season/type/category → Dropdown, constraint=true
-   - If column contains product name/title/description → Textbox or RichText, mandatory=true
-   - If column contains price/cost/mrp → Textbox, float
-   - If column contains image/photo/img → Textbox, varchar, length=2048
-   - If column contains date → Date, date
-   - If column contains tags/features/material → MultiSelect, constraint=true
+   - SKU, code, id fields → Textbox, varchar, mandatory=true
+   - Brand, colour, size, gender, season, type, category → Dropdown, constraint=true
+   - Product name / title → Textbox, mandatory=true
+   - Description → RichText, varchar, length=65536
+   - Price, MRP, cost → Textbox, float
+   - Image/photo/img URLs → Textbox, varchar, length=2048
+   - Tags, features, materials → MultiSelect, constraint=true
+   - Date fields → Date, date
 
-3. constraint=true ONLY for attributes where users pick from a predefined list (brand, colour, size, gender, season, status, category, type, material).
+3. constraint=true ONLY for attributes with predefined selectable values.
 
-4. mandatory=true ONLY for: sku, code, product_name, mrp (identity and pricing fields).
-
-5. attribute_group examples:
-   - "Product Identification": code, sku, gtin, hsn
-   - "Pricing": mrp, price, cost
-   - "Classification": category, type, gender, season, brand
-   - "Technical Specs": material, fabric, weight, dimensions
-   - "Media": image_url, video_url
-   - "Brand & Origin": brand, manufacturer, country_of_origin
-   - "Shipping": weight, length, width, height
+4. mandatory=true ONLY for: sku, code, product_name, mrp.
 
 Source columns with stats:
 {profile_text}
 
 Sample rows:
 {sample_text}"""
-
-# ─── small helpers ───────────────────────────────────────────────
 
 MAX_PROFILE_COLS = 150
 
@@ -92,25 +85,6 @@ def parse_mapping_response(raw):
     raise ValueError(f"Cannot extract mappings from: {type(raw)}")
 
 
-def normalize_mapping(raw_list):
-    result = []
-    for m in raw_list:
-        src = m.get("source_column", "")
-        target = m.pop("target", m.get("target_attribute", src))
-        target = target.lower().replace(" ", "_").replace("-", "_")
-        m["target_attribute"] = target
-        m["constraint"] = m.pop("constrained", m.get("constraint", False))
-        m["attribute_type"] = m.pop("type", m.get("attribute_type", "Textbox"))
-        m["attribute_data_type"] = m.pop("data_type", m.get("attribute_data_type", "varchar"))
-        m["attribute_group"] = m.pop("group", m.get("attribute_group", "Basic Information"))
-        result.append(m)
-    return result
-
-
-def validate_mapping(raw_list):
-    return MappingResponse(mappings=[ColumnMapping(**m) for m in raw_list])
-
-
 def cache_mapping(fingerprint, mappings):
     save_cached_mapping(fingerprint, [m.model_dump() for m in mappings])
 
@@ -120,7 +94,8 @@ def avg_confidence(mappings):
         return 0.0
     return sum(m.confidence for m in mappings) / len(mappings)
 
-# ─── node functions ──────────────────────────────────────────────
+
+# ─── Graph nodes (thin orchestrators) ────────────────────────────
 
 def fingerprint_source(state):
     rows = read_file(state["source_path"], state.get("sheet_name"))
@@ -138,13 +113,20 @@ def fingerprint_source(state):
 
 
 def profile_source(state):
+    if not state.get("sheet_name"):
+        result = detect_data_sheet.invoke({"path": state["source_path"]})
+        state["sheet_name"] = result["sheet"]
+        print(f"  Auto-detected sheet: '{result['sheet']}' ({result['cells']} cells)")
+
     rows = read_file(state["source_path"], state.get("sheet_name"))
     headers, data = get_headers_and_data(rows)
     state["headers"] = headers
-    state["profiles"] = profile_columns(headers, data)
+    state["profiles"] = profile_columns.invoke({"headers": headers, "rows": data})
     state["row_count"] = len(data)
     state["sample_rows"] = [dict(zip(headers, row)) for row in data[:5]]
-    state["category_hierarchy"] = detect_category_sheets(state["source_path"])
+    state["category_candidates"] = detect_category_structure.invoke({"path": state["source_path"], "data_sheet": state["sheet_name"]})
+    state["category_path_config"] = {}
+    state["category_hierarchy"] = []
     return state
 
 
@@ -155,67 +137,91 @@ def map_columns(state):
     prompt = build_mapping_prompt(state["profiles"], state.get("sample_rows", []))
     raw = call_llm(prompt)
     extracted = parse_mapping_response(raw)
-    normalized = normalize_mapping(extracted)
-    parsed = validate_mapping(normalized)
+    normalized = normalize_mapping.invoke({"raw_list": extracted})
+    parsed = validate_mapping.invoke({"raw_list": normalized})
 
-    state["mapping"] = parsed.mappings
-    state["mapping_requires_review"] = avg_confidence(parsed.mappings) < 0.75
-    cache_mapping(state["fingerprint"], parsed.mappings)
+    state["mapping"] = parsed
+    state["mapping_requires_review"] = avg_confidence(parsed) < 0.75
+    cache_mapping(state["fingerprint"], parsed)
+    return state
+
+
+def resolve_category_paths(state):
+    candidates = state.get("category_candidates", [])
+    if not candidates:
+        return state
+
+    prompt = f"""You are a PIM data expert. Given sheets that may contain category hierarchy data,
+decide which columns form the category path.
+
+Return JSON:
+  sheet (str): which sheet to use
+  columns (list[str]): column names in order from top level to bottom level
+  skip_code_columns (bool): whether to exclude code/id/num columns from the path
+
+Rules:
+- Pick columns whose values form a parent → child chain (e.g. "Electronics" → "Audio" → "Headphones")
+- Skip columns that contain codes, IDs, numbers — they are identifiers, not hierarchy levels
+- Order columns from broadest to most specific
+
+Candidates:
+{json.dumps(candidates, indent=2)}"""
+
+    response = client.models.generate_content(
+        model="gemini-2.5-flash-lite",
+        contents=prompt,
+        config={"response_mime_type": "application/json"}
+    )
+    result = json.loads(response.text)
+
+    if isinstance(result, list):
+        result = result[0] if result else {}
+    sheet_name = result.get("sheet", "")
+    columns = result.get("columns", [])
+    skip_codes = result.get("skip_code_columns", True)
+
+    candidate = next((c for c in candidates if c["sheet"] == sheet_name), None)
+    if not candidate or not columns:
+        return state
+
+    all_headers = candidate["headers"]
+    col_indices = []
+    for col in columns:
+        if col in all_headers:
+            col_indices.append(all_headers.index(col))
+
+    if skip_codes:
+        code_kw = ["code", "id", "key", "num", "no"]
+        col_indices = [i for i in col_indices if not any(kw in all_headers[i].lower() for kw in code_kw)]
+        if len(col_indices) < 2:
+            col_indices = [all_headers.index(col) for col in columns if col in all_headers]
+
+    if len(col_indices) < 2:
+        return state
+
+    paths = set()
+    wb = openpyxl.load_workbook(state["source_path"], read_only=True, data_only=True)
+    ws = wb[sheet_name]
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        parts = [str(row[i]).strip() for i in col_indices if i < len(row) and row[i] is not None and str(row[i]).strip()]
+        if len(parts) >= 2:
+            paths.add(" > ".join(parts))
+    wb.close()
+
+    state["category_path_config"] = result
+    state["category_hierarchy"] = sorted(paths)
     return state
 
 
 def build_attributes(state):
-    defs = []
-    for m in state["mapping"]:
-        a_type = m.attribute_type
-        constraint = m.constraint or a_type in ("Dropdown", "MultiSelect")
-
-        if a_type == "RichText":
-            length = 65536
-        elif a_type == "Textarea":
-            length = 16384
-        elif "image" in m.target_attribute.lower():
-            length = 2048
-        else:
-            length = m.length or 255
-
-        ref_master = f"{m.target_attribute.replace('_', ' ').title()} Master" if constraint else ""
-        ref_attr = m.target_attribute.lower().replace(" ", "_") if constraint else ""
-
-        defs.append({
-            "attribute_name": m.target_attribute.lower().replace(" ", "_"),
-            "short_name": m.target_attribute.lower().replace(" ", "_"),
-            "display_name": m.target_attribute.replace("_", " ").title(),
-            "attribute_type": a_type,
-            "attribute_data_type": m.attribute_data_type,
-            "constraint": constraint,
-            "length": length,
-            "mandatory": m.mandatory,
-            "filter": True,
-            "editability": True,
-            "visibility": True,
-            "searchable": True,
-            "auto_translate": False,
-            "attribute_group": m.attribute_group,
-            "reference_master": ref_master,
-            "reference_attribute": ref_attr,
-            "status": "Active"
-        })
-
+    defs = build_attribute_definitions.invoke({"mappings": state["mapping"]})
     state["attribute_definitions"] = defs
     return state
 
 
 def collect_references(state):
-    refs = {}
-    for m in state["mapping"]:
-        if m.attribute_type not in ("Dropdown", "MultiSelect"):
-            continue
-        profile = next((p for p in state["profiles"] if p["name"] == m.source_column), None)
-        if profile and profile.get("unique_values"):
-            master_key = f"{m.target_attribute.replace('_', ' ').title()} Master"
-            refs[master_key] = sorted(profile["unique_values"])
-
+    raw_mappings = [{"source_column": m.source_column, "target_attribute": m.target_attribute, "attribute_type": m.attribute_type} for m in state["mapping"]]
+    refs = extract_reference_values.invoke({"mappings": raw_mappings, "profiles": state["profiles"]})
     state["reference_values"] = refs
     return state
 
@@ -226,30 +232,30 @@ def fill_templates(state):
     files = {}
 
     if state.get("category_hierarchy"):
-        wb = render_category_xlsx(state["category_hierarchy"])
+        wb = render_category_xlsx.invoke({"paths": state["category_hierarchy"]})
         wb.save(f"output/{fp}_category.xlsx")
         wb.close()
         files["category"] = f"output/{fp}_category.xlsx"
 
-    wb = render_attribute_xlsx(state["attribute_definitions"])
+    wb = render_attribute_xlsx.invoke({"defs": state["attribute_definitions"]})
     wb.save(f"output/{fp}_attribute.xlsx")
     wb.close()
     files["attribute"] = f"output/{fp}_attribute.xlsx"
 
     if state.get("reference_values"):
-        wb = render_reference_xlsx(state["reference_values"])
+        wb = render_reference_xlsx.invoke({"refs": state["reference_values"]})
         wb.save(f"output/{fp}_reference.xlsx")
         wb.close()
         files["reference"] = f"output/{fp}_reference.xlsx"
 
     rows = read_file(state["source_path"], state.get("sheet_name"))
     headers, data = get_headers_and_data(rows)
-    img_cols = [h for h in headers if any(k in h.lower() for k in ("image", "img", "picture", "photo"))]
+    img_cols = extract_image_columns(headers)
     mapping_list = [{"source_column": m.source_column, "target_attribute": m.target_attribute} for m in state["mapping"]]
     attr_names = [m.get("target_attribute", m.get("source_column")) for m in mapping_list]
 
     product_rows = build_product_rows(headers, data, mapping_list, img_cols)
-    wb = render_product_xlsx(product_rows, attr_names)
+    wb = render_product_xlsx.invoke({"rows": product_rows, "attr_names": attr_names})
     wb.save(f"output/{fp}_product.xlsx")
     wb.close()
     files["product"] = f"output/{fp}_product.xlsx"

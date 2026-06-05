@@ -14,6 +14,8 @@ def run(path, sheet=None):
         "sample_rows": [],
         "profiles": [],
         "row_count": 0,
+        "category_candidates": [],
+        "category_path_config": {},
         "category_hierarchy": [],
         "mapping": [],
         "mapping_requires_review": False,

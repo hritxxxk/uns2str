@@ -28,6 +28,8 @@ class AgentState(MessagesState):
     profiles: list[dict]
     sample_rows: list[dict]
     row_count: int
+    category_candidates: list[dict]
+    category_path_config: dict
     category_hierarchy: list[str]
     mapping: list[ColumnMapping]
     mapping_requires_review: bool
