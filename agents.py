@@ -13,7 +13,7 @@ from tools.rendering import render_category_xlsx, render_attribute_xlsx, render_
 load_dotenv()
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
-PIM_DEFAULTS = ["sku_name", "code", "description", "mrp", "brand"]
+PIM_DEFAULTS = ["sku_name", "code"]
 
 MAPPING_PROMPT_TEMPLATE = """You are a PIM data mapping expert. Map each source column to a PIM attribute.
 
@@ -251,11 +251,6 @@ Candidates:
         return None
     all_h = candidate["headers"]
     indices = [all_h.index(c) for c in columns if c in all_h]
-    if skip_codes:
-        kw = ["code", "id", "key", "num", "no"]
-        indices = [i for i in indices if not any(k in all_h[i].lower() for k in kw)]
-        if len(indices) < 2:
-            indices = [all_h.index(c) for c in columns if c in all_h]
     if len(indices) < 2:
         return None
     wb = openpyxl.load_workbook(state["source_path"], read_only=True, data_only=True)
@@ -267,20 +262,21 @@ Candidates:
 
 def _strategy_level_columns(state):
     headers = state.get("headers", [])
-    level_cols = [i for i, h in enumerate(headers)
-                  if any(k in h.lower() for k in ("categor", "sub", "product type", "l1", "l2", "l3", "l4", "level", "silo", "commodity", "division", "department", "gender"))
-                  and "code" not in h.lower() and "id" not in h.lower()]
-    if len(level_cols) < 2:
-        return None
-    prompt = f"""Pick columns that form a category path from this list. Skip duplicates.
+    sample = state.get("sample_rows", [{}])[0] if state.get("sample_rows") else {}
+    from tools.profiling import profile_columns
+    rows = read_file(state["source_path"], state.get("sheet_name"))
+    headers2, data2 = get_headers_and_data(rows, state.get("header_row", 0))
+    dr = state.get("data_start_row", state.get("header_row", 0) + 1)
+    if dr < state.get("header_row", 0) + 1:
+        dr = state.get("header_row", 0) + 1
+    cols = profile_columns.invoke({"headers": headers2, "rows": rows[dr:]})
+    col_info = {c["name"]: {"unique": c["unique"], "sample": c["sample"][:2]} for c in cols if c["non_null"] > 0}
+    prompt = f"""Pick columns forming a product category hierarchy (broad → narrow groupings).
+Exclude: identifiers (SKU, codes, IDs), prices, descriptions, images, dates, names, colors, sizes, statuses, and columns with identical unique value sets.
 Return JSON: {{"columns": ["col1", "col2", ...]}}
-Columns: {json.dumps([headers[i] for i in level_cols])}
-Sample values: {json.dumps({headers[i]: state.get("sample_rows", [{}])[0].get(headers[i], "") for i in level_cols})}"""
-    resp = client.models.generate_content(
-        model="gemini-2.5-flash-lite",
-        contents=prompt,
-        config={"response_mime_type": "application/json"}
-    )
+Columns with unique counts and samples:
+{json.dumps(col_info, indent=2)}"""
+    resp = client.models.generate_content(model="gemini-2.5-flash-lite", contents=prompt, config={"response_mime_type": "application/json"})
     r = json.loads(resp.text)
     if isinstance(r, list):
         r = r[0] if r else {}
@@ -344,14 +340,13 @@ Return JSON: {{"multi_value_separator": str or null, "path_separator": str, "spl
 
 def _strategy_infer_from_attributes(state):
     headers = state.get("headers", [])
-    attr_keywords = ["product type", "commodity", "silo", "pillar", "division", "department", "gender", "category"]
-    attr_cols = [i for i, h in enumerate(headers) if any(k in h.lower() for k in attr_keywords)]
-    if len(attr_cols) < 2:
-        return None
-    prompt = f"""These columns might form a product hierarchy. Pick columns in order from broadest to most specific.
+    sample = state.get("sample_rows", [{}])[0] if state.get("sample_rows") else {}
+    preview = {h: str(sample.get(h, ""))[:30] for h in headers if h.strip() and str(sample.get(h, "")).strip()}
+    prompt = f"""Pick columns forming a product category hierarchy (broad → narrow groupings).
+Exclude: identifiers (SKU, codes, IDs), prices, descriptions, images, dates, names, colors, sizes, statuses.
 Return JSON: {{"columns": ["col1", "col2", ...]}}
-Available columns: {json.dumps([headers[i] for i in attr_cols])}
-Sample row: {json.dumps({headers[i]: state.get("sample_rows", [{}])[0].get(headers[i], "") for i in attr_cols})}"""
+Columns:
+{json.dumps(preview, indent=2)}"""
     resp = client.models.generate_content(
         model="gemini-2.5-flash-lite",
         contents=prompt,
