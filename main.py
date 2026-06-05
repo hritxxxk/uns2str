@@ -1,10 +1,12 @@
 import os
-from state import AgentState
+import json
 from graph import graph
+from helpers import build_product_rows, extract_image_columns, get_headers_and_data, read_file
+from tools.rendering import render_all_templates
 
 
 def run(path, sheet=None):
-    initial: AgentState = {
+    initial = {
         "messages": [],
         "source_path": path,
         "sheet_name": sheet,
@@ -14,8 +16,8 @@ def run(path, sheet=None):
         "header_row": 0,
         "data_start_row": 1,
         "metadata": [],
-        "sample_rows": [],
         "profiles": [],
+        "sample_rows": [],
         "row_count": 0,
         "category_candidates": [],
         "category_path_config": {},
@@ -31,16 +33,18 @@ def run(path, sheet=None):
     result = graph.invoke(initial)
 
     print(f"\nSource: {path}")
-    print(f"Fingerprint: {result['fingerprint']}")
-    print(f"Rows: {result['row_count']}, Columns: {len(result['headers'])}")
-    print(f"Attributes defined: {len(result['attribute_definitions'])}")
+    print(f"Fingerprint: {result.get('fingerprint', '?')}")
+    print(f"Rows: {result.get('row_count', 0)}, Columns: {len(result.get('headers', []))}")
+    print(f"Attributes defined: {len(result.get('attribute_definitions', []))}")
 
-    if result.get("reference_values"):
-        total = sum(len(v) for v in result["reference_values"].values())
-        print(f"Reference values: {total} across {len(result['reference_values'])} masters")
+    refs = result.get("reference_values", {})
+    if refs:
+        total = sum(len(v) for v in refs.values())
+        print(f"Reference values: {total} across {len(refs)} masters")
 
-    if result.get("category_hierarchy"):
-        print(f"Category paths: {len(result['category_hierarchy'])}")
+    cats = result.get("category_hierarchy", [])
+    if cats:
+        print(f"Category paths: {len(cats)}")
 
     print(f"\nOutput:")
     for kind, p in result.get("output_files", {}).items():

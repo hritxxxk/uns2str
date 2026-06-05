@@ -15,6 +15,21 @@ class ColumnMapping(BaseModel):
     confidence: float = Field(default=0.5, description="Confidence score 0.0 to 1.0")
 
 
+PIM_DEFAULTS = ["sku_name", "code", "description", "mrp", "brand"]
+
+
+class ColumnReview(BaseModel):
+    source_column: str = Field(default="", description="Column name")
+    is_valid_attribute: bool = Field(default=False, description="True if this is a real product attribute worth keeping")
+    target_attribute: str = Field(default="", description="PIM attribute name if valid")
+    attribute_type: str = Field(default="Textbox", description="Textbox, Dropdown, etc.")
+    reason: str = Field(default="", description="Why this was flagged or kept")
+
+
+class ReviewResponse(BaseModel):
+    columns: list[ColumnReview]
+
+
 class MappingResponse(BaseModel):
     mappings: list[ColumnMapping]
 

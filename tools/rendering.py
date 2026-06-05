@@ -50,6 +50,42 @@ def render_reference_xlsx(refs: dict[str, list[str]]) -> Workbook:
 
 
 @tool
+def render_all_templates(fingerprint: str, category_hierarchy: list, attribute_definitions: list,
+                         reference_values: dict, headers: list, product_rows: list,
+                         attr_names: list) -> dict:
+    """Generate all 4 PIM output templates and save them to the output directory.
+    
+    Returns a dict of {template_type: file_path}."""
+    import os
+    os.makedirs("output", exist_ok=True)
+    files = {}
+
+    if category_hierarchy:
+        wb = render_category_xlsx.invoke({"paths": category_hierarchy})
+        wb.save(f"output/{fingerprint}_category.xlsx")
+        wb.close()
+        files["category"] = f"output/{fingerprint}_category.xlsx"
+
+    wb = render_attribute_xlsx.invoke({"defs": attribute_definitions})
+    wb.save(f"output/{fingerprint}_attribute.xlsx")
+    wb.close()
+    files["attribute"] = f"output/{fingerprint}_attribute.xlsx"
+
+    if reference_values:
+        wb = render_reference_xlsx.invoke({"refs": reference_values})
+        wb.save(f"output/{fingerprint}_reference.xlsx")
+        wb.close()
+        files["reference"] = f"output/{fingerprint}_reference.xlsx"
+
+    wb = render_product_xlsx.invoke({"rows": product_rows, "attr_names": attr_names})
+    wb.save(f"output/{fingerprint}_product.xlsx")
+    wb.close()
+    files["product"] = f"output/{fingerprint}_product.xlsx"
+
+    return files
+
+
+@tool
 def render_product_xlsx(rows: list[dict], attr_names: list[str]) -> Workbook:
     """Generate product master workbook.
     
