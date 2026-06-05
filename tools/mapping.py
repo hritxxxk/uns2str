@@ -41,7 +41,7 @@ def build_attribute_definitions(mappings: list[ColumnMapping]) -> list[dict]:
     defs = []
     for m in mappings:
         a_type = m.attribute_type
-        constraint = m.constraint or a_type in ("Dropdown", "MultiSelect")
+        constraint = m.constraint or a_type in ("Dropdown", "MultiSelect", "MultiSelectDropdown", "MultiTextBox")
 
         if a_type == "RichText":
             length = 65536

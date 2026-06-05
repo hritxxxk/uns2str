@@ -6,9 +6,9 @@ from pydantic import BaseModel, Field
 class ColumnMapping(BaseModel):
     source_column: str = Field(default="", description="Original column name from source file")
     target_attribute: str = Field(default="", description="Target PIM attribute name")
-    attribute_type: str = Field(default="Textbox", description="Textbox, Dropdown, RichText, Textarea, MultiSelect, Date, Time")
-    attribute_data_type: str = Field(default="varchar", description="varchar, int, float, boolean, date")
-    constraint: bool = Field(default=False, description="True if dropdown or multiselect")
+    attribute_type: str = Field(default="Textbox", description="Textbox, Dropdown, RichText, Textarea, MultiSelect, MultiSelectDropdown, MultiTextBox, Date, Time")
+    attribute_data_type: str = Field(default="varchar", description="varchar, varchar[], int, float, boolean, date")
+    constraint: bool = Field(default=False, description="True if dropdown, multiselect, multiselectdropdown, or multitextbox")
     length: Optional[int] = Field(None, description="Max field length")
     mandatory: bool = Field(default=False, description="True if this field is required")
     attribute_group: str = Field(default="Basic Information", description="Logical group name")

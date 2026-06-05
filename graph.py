@@ -28,10 +28,13 @@ The PIM already has these defaults: sku_name, code, description, mrp, brand.
 Map source columns TO them instead of recreating them.
 
 target_attribute must be snake_case: "product_name", "item_code", "mrp", "brand".
-attribute_type: Dropdown for brand/colour/size/gender/season/category, 
-RichText for descriptions, Textbox for codes/names/numbers, 
-MultiSelect for tags/features, Date for dates.
-constraint: true ONLY for dropdown/multiselect.
+attribute_type: Dropdown for brand/colour/size/gender/season/category,
+RichText for descriptions, Textbox for codes/names/numbers,
+MultiSelect for tags/features, MultiSelectDropdown for multi-select dropdowns,
+MultiTextBox for multi-line text like bullet points, Date for dates.
+attribute_data_type: varchar for text, varchar[] for array values, int for whole numbers,
+float for decimals/prices, boolean for yes/no, date for dates.
+constraint: true ONLY for dropdown/multiselect/multiselectdropdown.
 mandatory: true ONLY for sku, code, product_name, mrp.
 
 Source columns:

@@ -10,7 +10,7 @@ def extract_reference_values(mappings: list[dict], profiles: list[dict]) -> dict
     refs = {}
     for m in mappings:
         attr_type = m.get("attribute_type", "") if isinstance(m, dict) else m.attribute_type
-        if attr_type not in ("Dropdown", "MultiSelect"):
+        if attr_type not in ("Dropdown", "MultiSelect", "MultiSelectDropdown", "MultiTextBox"):
             continue
         src = m.get("source_column", "") if isinstance(m, dict) else m.source_column
         target = m.get("target_attribute", "") if isinstance(m, dict) else m.target_attribute
