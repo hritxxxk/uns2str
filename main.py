@@ -27,6 +27,7 @@ def run(path, sheet=None):
         "attribute_definitions": [],
         "reference_values": {},
         "output_files": {},
+        "need_user_input": False,
         "error": None
     }
 

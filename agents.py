@@ -4,7 +4,7 @@ import openpyxl
 from dotenv import load_dotenv
 from google import genai
 from helpers import *
-from state import MappingResponse, ColumnMapping
+from state import MappingResponse, ColumnMapping, CategoryValidation
 from tools.profiling import detect_data_sheet, profile_columns, detect_category_structure
 from tools.mapping import normalize_mapping, validate_mapping, build_attribute_definitions
 from tools.references import extract_reference_values
@@ -182,70 +182,190 @@ def map_columns(state):
     return state
 
 
-def resolve_category_paths(state):
-    candidates = state.get("category_candidates", [])
-    if not candidates:
-        return state
+def _validate_paths(paths):
+    if not paths or len(paths) < 2:
+        return False, "Less than 2 paths found"
+    prompt = f"""Validate these category paths. They are VALID if they form a parent→child hierarchy.
 
-    prompt = f"""You are a PIM data expert. Given sheets that may contain category hierarchy data,
-decide which columns form the category path.
+ACCEPT paths that have:
+- Prefix codes like "P_Product", "N_Item", "C_Code" (these are labels, not IDs)
+- Mixed naming conventions
 
-Return JSON:
-  sheet (str): which sheet to use
-  columns (list[str]): column names in order from top level to bottom level
-  skip_code_columns (bool): whether to exclude code/id/num columns from the path
+REJECT paths that have:
+- True duplicate levels like "A > A > A" where same name repeats
+- Garbage data like "t1 > temp > temp"
+- Single values that aren't hierarchical
 
-Rules:
-- Pick columns whose values form a parent → child chain (e.g. "Electronics" → "Audio" → "Headphones")
-- Skip columns that contain codes, IDs, numbers — they are identifiers, not hierarchy levels
-- Order columns from broadest to most specific
+Sample paths:
+{json.dumps(list(paths)[:10], indent=2)}
 
-Candidates:
-{json.dumps(candidates, indent=2)}"""
-
-    response = client.models.generate_content(
+Return JSON: {{"is_valid": bool, "reason": "short explanation"}}"""
+    resp = client.models.generate_content(
         model="gemini-2.5-flash-lite",
         contents=prompt,
         config={"response_mime_type": "application/json"}
     )
-    result = json.loads(response.text)
+    r = json.loads(resp.text)
+    if isinstance(r, list):
+        r = r[0] if r else {}
+    return r.get("is_valid", False), r.get("reason", "")
 
-    if isinstance(result, list):
-        result = result[0] if result else {}
-    sheet_name = result.get("sheet", "")
-    columns = result.get("columns", [])
-    skip_codes = result.get("skip_code_columns", True)
 
-    candidate = next((c for c in candidates if c["sheet"] == sheet_name), None)
-    if not candidate or not columns:
-        return state
-
-    all_headers = candidate["headers"]
-    col_indices = []
-    for col in columns:
-        if col in all_headers:
-            col_indices.append(all_headers.index(col))
-
-    if skip_codes:
-        code_kw = ["code", "id", "key", "num", "no"]
-        col_indices = [i for i in col_indices if not any(kw in all_headers[i].lower() for kw in code_kw)]
-        if len(col_indices) < 2:
-            col_indices = [all_headers.index(col) for col in columns if col in all_headers]
-
-    if len(col_indices) < 2:
-        return state
-
+def _build_paths_from_columns(headers, rows, col_indices, sep=" > "):
     paths = set()
-    wb = openpyxl.load_workbook(state["source_path"], read_only=True, data_only=True)
-    ws = wb[sheet_name]
-    for row in ws.iter_rows(min_row=2, values_only=True):
+    for row in rows:
         parts = [str(row[i]).strip() for i in col_indices if i < len(row) and row[i] is not None and str(row[i]).strip()]
         if len(parts) >= 2:
-            paths.add(" > ".join(parts))
-    wb.close()
+            paths.add(sep.join(parts))
+    return paths
 
-    state["category_path_config"] = result
-    state["category_hierarchy"] = sorted(paths)
+
+def _strategy_hierarchy_sheet(state):
+    candidates = state.get("category_candidates", [])
+    if not candidates:
+        return None
+    prompt = f"""Given sheets with potential hierarchy data, decide which columns form a category path.
+Return JSON: {{"sheet": str, "columns": [str], "skip_code_columns": bool}}
+Rules: Pick columns forming parent→child chain. Skip code/id/num columns.
+Candidates:
+{json.dumps(candidates, indent=2)}"""
+    resp = client.models.generate_content(
+        model="gemini-2.5-flash-lite",
+        contents=prompt,
+        config={"response_mime_type": "application/json"}
+    )
+    r = json.loads(resp.text)
+    if isinstance(r, list):
+        r = r[0] if r else {}
+    sheet_name = r.get("sheet", "")
+    columns = r.get("columns", [])
+    skip_codes = r.get("skip_code_columns", True)
+    candidate = next((c for c in candidates if c["sheet"] == sheet_name), None)
+    if not candidate or not columns:
+        return None
+    all_h = candidate["headers"]
+    indices = [all_h.index(c) for c in columns if c in all_h]
+    if skip_codes:
+        kw = ["code", "id", "key", "num", "no"]
+        indices = [i for i in indices if not any(k in all_h[i].lower() for k in kw)]
+        if len(indices) < 2:
+            indices = [all_h.index(c) for c in columns if c in all_h]
+    if len(indices) < 2:
+        return None
+    wb = openpyxl.load_workbook(state["source_path"], read_only=True, data_only=True)
+    ws = wb[sheet_name]
+    rows = list(ws.iter_rows(min_row=2, values_only=True))
+    wb.close()
+    return _build_paths_from_columns(all_h, rows, indices)
+
+
+def _strategy_level_columns(state):
+    headers = state.get("headers", [])
+    level_cols = [i for i, h in enumerate(headers)
+                  if any(k in h.lower() for k in ("categor", "l1", "l2", "l3", "l4", "level", "silo", "commodity"))
+                  and "code" not in h.lower() and "id" not in h.lower()]
+    if len(level_cols) < 2:
+        return None
+    prompt = f"""Pick columns that form a category path from this list. Skip duplicates.
+Return JSON: {{"columns": ["col1", "col2", ...]}}
+Columns: {json.dumps([headers[i] for i in level_cols])}
+Sample values: {json.dumps({headers[i]: state.get("sample_rows", [{}])[0].get(headers[i], "") for i in level_cols})}"""
+    resp = client.models.generate_content(
+        model="gemini-2.5-flash-lite",
+        contents=prompt,
+        config={"response_mime_type": "application/json"}
+    )
+    r = json.loads(resp.text)
+    if isinstance(r, list):
+        r = r[0] if r else {}
+    chosen = r.get("columns", [])
+    indices = [headers.index(c) for c in chosen if c in headers]
+    if len(indices) < 2:
+        return None
+    rows = read_file(state["source_path"], state.get("sheet_name"))
+    _, data = get_headers_and_data(rows, state.get("header_row", 0))
+    dr = state.get("data_start_row", state.get("header_row", 0) + 1)
+    if dr < state.get("header_row", 0) + 1:
+        dr = state.get("header_row", 0) + 1
+    data = rows[dr:]
+    return _build_paths_from_columns(headers, data, indices)
+
+
+def _strategy_single_column(state):
+    headers = state.get("headers", [])
+    cat_col = next((i for i, h in enumerate(headers) if h.lower() in ("category", "categories", "product type")), None)
+    if cat_col is None:
+        return None
+    rows = read_file(state["source_path"], state.get("sheet_name"))
+    _, data = get_headers_and_data(rows, state.get("header_row", 0))
+    dr = state.get("data_start_row", state.get("header_row", 0) + 1)
+    if dr < state.get("header_row", 0) + 1:
+        dr = state.get("header_row", 0) + 1
+    data = rows[dr:]
+    paths = set()
+    for row in data:
+        val = str(row[cat_col]).strip() if cat_col < len(row) and row[cat_col] is not None else ""
+        if val and (">" in val or "/" in val or "|" in val):
+            sep = ">" if ">" in val else "/" if "/" in val else "|"
+            parts = [p.strip() for p in val.split(sep) if p.strip()]
+            if len(parts) >= 2:
+                paths.add(" > ".join(parts))
+        elif val:
+            paths.add(val)
+    return paths if len(paths) >= 2 else None
+
+
+def _strategy_infer_from_attributes(state):
+    headers = state.get("headers", [])
+    attr_keywords = ["product type", "commodity", "silo", "pillar", "division", "department", "gender", "category"]
+    attr_cols = [i for i, h in enumerate(headers) if any(k in h.lower() for k in attr_keywords)]
+    if len(attr_cols) < 2:
+        return None
+    prompt = f"""These columns might form a product hierarchy. Pick columns in order from broadest to most specific.
+Return JSON: {{"columns": ["col1", "col2", ...]}}
+Available columns: {json.dumps([headers[i] for i in attr_cols])}
+Sample row: {json.dumps({headers[i]: state.get("sample_rows", [{}])[0].get(headers[i], "") for i in attr_cols})}"""
+    resp = client.models.generate_content(
+        model="gemini-2.5-flash-lite",
+        contents=prompt,
+        config={"response_mime_type": "application/json"}
+    )
+    r = json.loads(resp.text)
+    if isinstance(r, list):
+        r = r[0] if r else {}
+    chosen = r.get("columns", [])
+    indices = [headers.index(c) for c in chosen if c in headers]
+    if len(indices) < 2:
+        return None
+    rows = read_file(state["source_path"], state.get("sheet_name"))
+    _, data = get_headers_and_data(rows, state.get("header_row", 0))
+    dr = state.get("data_start_row", state.get("header_row", 0) + 1)
+    if dr < state.get("header_row", 0) + 1:
+        dr = state.get("header_row", 0) + 1
+    data = rows[dr:]
+    return _build_paths_from_columns(headers, data, indices)
+
+
+def resolve_category_paths(state):
+    strategies = [
+        ("Hierarchy sheet", _strategy_hierarchy_sheet),
+        ("Level columns (CATEGORY1-4)", _strategy_level_columns),
+        ("Single category column", _strategy_single_column),
+        ("Inferred from product attributes", _strategy_infer_from_attributes),
+    ]
+
+    for name, strategy in strategies:
+        result = strategy(state)
+        if result is None:
+            continue
+        valid, reason = _validate_paths(result)
+        print(f"  Category strategy '{name}': {'✅' if valid else '❌'} {reason}")
+        if valid:
+            state["category_hierarchy"] = sorted(result)
+            return state
+
+    state["need_user_input"] = True
+    print("  ⚠ Could not determine category paths. Set need_user_input=True")
     return state
 
 

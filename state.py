@@ -30,6 +30,11 @@ class ReviewResponse(BaseModel):
     columns: list[ColumnReview]
 
 
+class CategoryValidation(BaseModel):
+    is_valid: bool = Field(description="Whether the candidate paths form a valid category hierarchy")
+    reason: str = Field(default="", description="If invalid, why. If valid, confirmation")
+
+
 class MappingResponse(BaseModel):
     mappings: list[ColumnMapping]
 
@@ -54,4 +59,5 @@ class AgentState(MessagesState):
     attribute_definitions: list[dict]
     reference_values: dict[str, list[str]]
     output_files: dict[str, str]
+    need_user_input: bool
     error: Optional[str]
