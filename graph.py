@@ -1,5 +1,6 @@
 import os
 import json
+from google import genai as genai_module
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.graph import StateGraph, START, END
@@ -21,7 +22,7 @@ def map_columns_node(state: AgentState) -> dict:
     sample_text = json.dumps(state.get("sample_rows", [])[:3], indent=2)
     meta_text = json.dumps(state.get("metadata", []), indent=2)
 
-    prompt = f"""Map each source column to a PIM attribute.
+    prompt = f"""Map each source column to a PIM attribute. Return a JSON object with key "mappings" containing an array.
 
 The PIM already has these defaults: sku_name, code, description, mrp, brand.
 Map source columns TO them instead of recreating them.
@@ -42,8 +43,20 @@ Metadata:
 Sample rows:
 {sample_text}"""
 
-    response = structured_llm.invoke(prompt)
-    mapped_cols = {m.source_column for m in response.mappings}
+    try:
+        response = structured_llm.invoke(prompt)
+        parsed = response.mappings
+    except Exception:
+        fallback = genai_module.Client(api_key=os.getenv("GEMINI_API_KEY"))
+        raw = fallback.models.generate_content(
+            model="gemini-2.5-flash-lite",
+            contents=prompt + "\n\nReturn ONLY a JSON array. No wrapper key.",
+            config={"response_mime_type": "application/json"}
+        )
+        data = json.loads(raw.text)
+        items = data if isinstance(data, list) else data.get("mappings", data.get("attributes", []))
+        parsed = [ColumnMapping(**m) for m in items]
+    mapped_cols = {m.source_column for m in parsed}
 
     # Pass 2: review unmapped columns — are they real attributes or noise?
     unmapped = [h for h in state.get("headers", []) if h not in mapped_cols]
@@ -60,7 +73,7 @@ Columns to review:
         review_result = review_llm.invoke(review_prompt)
         for col in review_result.columns:
             if col.is_valid_attribute:
-                response.mappings.append(ColumnMapping(
+                parsed.append(ColumnMapping(
                     source_column=col.source_column,
                     target_attribute=col.target_attribute or col.source_column.lower().replace(" ", "_"),
                     attribute_type=col.attribute_type,
@@ -72,13 +85,13 @@ Columns to review:
                     confidence=0.6
                 ))
 
-    confs = [m.confidence for m in response.mappings]
+    confs = [m.confidence for m in parsed]
     avg_conf = sum(confs) / len(confs) if confs else 0
 
-    save_cached_mapping(state["fingerprint"], [m.model_dump() for m in response.mappings])
+    save_cached_mapping(state["fingerprint"], [m.model_dump() for m in parsed])
 
     return {
-        "mapping": response.mappings,
+        "mapping": parsed,
         "mapping_requires_review": avg_conf < 0.75
     }
 

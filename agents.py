@@ -224,11 +224,17 @@ def _strategy_hierarchy_sheet(state):
     candidates = state.get("category_candidates", [])
     if not candidates:
         return None
+    trimmed = [{k: v for k, v in c.items()} for c in candidates[:3]]
+    for t in trimmed:
+        if len(t.get("headers", [])) > 20:
+            t["headers"] = t["headers"][:20]
+        if len(t.get("rows", [])) > 2:
+            t["rows"] = t["rows"][:2]
     prompt = f"""Given sheets with potential hierarchy data, decide which columns form a category path.
 Return JSON: {{"sheet": str, "columns": [str], "skip_code_columns": bool}}
 Rules: Pick columns forming parent→child chain. Skip code/id/num columns.
 Candidates:
-{json.dumps(candidates, indent=2)}"""
+{json.dumps(trimmed, indent=2)}"""
     resp = client.models.generate_content(
         model="gemini-2.5-flash-lite",
         contents=prompt,
@@ -302,16 +308,37 @@ def _strategy_single_column(state):
     if dr < state.get("header_row", 0) + 1:
         dr = state.get("header_row", 0) + 1
     data = rows[dr:]
+    samples = list(set(str(row[cat_col]).strip() for row in data[:50] if row[cat_col] is not None and str(row[cat_col]).strip()))[:10]
+    prompt = f"""Column '{headers[cat_col]}' contains category data. Sample values:
+{json.dumps(samples, indent=2)}
+Determine: multi_value_separator (if one cell has multiple categories), path_separator (between levels), split_cells (true/false).
+Return JSON: {{"multi_value_separator": str or null, "path_separator": str, "split_cells": bool}}"""
+    resp = client.models.generate_content(model="gemini-2.5-flash-lite", contents=prompt, config={"response_mime_type": "application/json"})
+    r = json.loads(resp.text)
+    if isinstance(r, list):
+        r = r[0] if r else {}
+    multi_sep = r.get("multi_value_separator")
+    path_sep = r.get("path_separator", ">")
+    split_cells = r.get("split_cells", False)
     paths = set()
     for row in data:
         val = str(row[cat_col]).strip() if cat_col < len(row) and row[cat_col] is not None else ""
-        if val and (">" in val or "/" in val or "|" in val):
-            sep = ">" if ">" in val else "/" if "/" in val else "|"
-            parts = [p.strip() for p in val.split(sep) if p.strip()]
+        if not val:
+            continue
+        if split_cells and multi_sep and multi_sep in val:
+            for chunk in val.split(multi_sep):
+                chunk = chunk.strip()
+                if not chunk:
+                    continue
+                if path_sep in chunk:
+                    parts = [p.strip() for p in chunk.split(path_sep) if p.strip()]
+                    if len(parts) >= 2:
+                        paths.add(" > ".join(parts))
+        elif path_sep in val:
+            parts = [p.strip() for p in val.split(path_sep) if p.strip()]
             if len(parts) >= 2:
                 paths.add(" > ".join(parts))
-        elif val:
-            paths.add(val)
+    return paths if len(paths) >= 2 else None
     return paths if len(paths) >= 2 else None
 
 
