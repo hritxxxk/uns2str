@@ -58,9 +58,17 @@ Sample rows:
 
 # ─── small helpers ───────────────────────────────────────────────
 
+MAX_PROFILE_COLS = 150
+
+
 def build_mapping_prompt(profiles, sample_rows):
+    capped = profiles[:MAX_PROFILE_COLS]
+    trimmed = [{k: v for k, v in p.items() if k != "unique_values"} for p in capped]
+    for p in trimmed:
+        if len(p.get("sample", [])) > 2:
+            p["sample"] = p["sample"][:2]
     return MAPPING_PROMPT_TEMPLATE.format(
-        profile_text=json.dumps(profiles, indent=2),
+        profile_text=json.dumps(trimmed, indent=2),
         sample_text=json.dumps(sample_rows[:3], indent=2)
     )
 
