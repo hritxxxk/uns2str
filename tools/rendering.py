@@ -37,17 +37,15 @@ def render_attribute_xlsx(defs: list[dict]) -> Workbook:
 
 @tool
 def render_reference_xlsx(refs: dict[str, list[str]]) -> Workbook:
-    """Generate reference master workbook. First row is master name, then values."""
+    """Generate reference master workbook. One column per attribute master."""
     wb = Workbook()
     ws = wb.active
-    ws["A1"] = "Reference Master"
-    row = 2
-    for master, values in refs.items():
-        ws.cell(row=row, column=1, value=master)
-        row += 1
-        for v in values:
-            ws.cell(row=row, column=1, value=v)
-            row += 1
+    all_values = list(refs.values())
+    max_rows = max(len(v) for v in all_values) if all_values else 0
+    for ci, (master, values) in enumerate(refs.items(), 1):
+        ws.cell(row=1, column=ci, value=master)
+        for ri, v in enumerate(values, 2):
+            ws.cell(row=ri, column=ci, value=v)
     return wb
 
 

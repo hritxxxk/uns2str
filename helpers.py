@@ -38,9 +38,9 @@ def read_file(path, sheet_name=None):
     return rows
 
 
-def get_headers_and_data(rows):
-    headers = [str(c) if c is not None else "" for c in rows[0]]
-    data = rows[1:]
+def get_headers_and_data(rows, header_row=0):
+    headers = [str(c) if c is not None else "" for c in rows[header_row]]
+    data = rows[header_row + 1:]
     return headers, data
 
 

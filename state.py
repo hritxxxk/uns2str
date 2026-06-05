@@ -25,6 +25,9 @@ class AgentState(MessagesState):
     fingerprint: str
     is_known_schema: bool
     headers: list[str]
+    header_row: int
+    data_start_row: int
+    metadata: list[dict]
     profiles: list[dict]
     sample_rows: list[dict]
     row_count: int
