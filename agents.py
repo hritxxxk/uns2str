@@ -15,7 +15,8 @@ client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 PIM_DEFAULTS = ["sku_name", "code"]
 
-MAPPING_PROMPT_TEMPLATE = """You are a PIM data mapping expert. Map each source column to a PIM attribute.
+if False:
+    MAPPING_PROMPT_TEMPLATE = """You are a PIM data mapping expert. Map each source column to a PIM attribute.
 
 Return a JSON object with key "mappings" containing an array of objects.
 Each object has these fields:
@@ -81,6 +82,23 @@ def call_llm(prompt):
         config={"response_mime_type": "application/json"}
     )
     return json.loads(response.text)
+
+
+def _safe_json_parse(text):
+    """Parse LLM JSON response, handling extra text gracefully."""
+    import re as _re
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    decoder = json.JSONDecoder()
+    for pattern in (r'\{.*?\}', r'\[.*?\]'):
+        for match in _re.finditer(pattern, text, _re.DOTALL):
+            try:
+                return decoder.decode(match.group())
+            except json.JSONDecodeError:
+                continue
+    return {}
 
 
 def parse_mapping_response(raw):
@@ -352,7 +370,12 @@ Columns:
         contents=prompt,
         config={"response_mime_type": "application/json"}
     )
-    r = json.loads(resp.text)
+    try:
+        r = json.loads(resp.text)
+    except json.JSONDecodeError:
+        import re as _re
+        match = _re.search(r'\{.*\}', resp.text, _re.DOTALL)
+        r = json.loads(match.group()) if match else {}
     if isinstance(r, list):
         r = r[0] if r else {}
     chosen = r.get("columns", [])
