@@ -39,7 +39,26 @@ class MappingResponse(BaseModel):
     mappings: list[ColumnMapping]
 
 
+class IngestionOutput(BaseModel):
+    status: str = Field(description="success or partial or failed")
+    fingerprint: str = Field(default="", description="File fingerprint")
+    attribute_count: int = Field(default=0, description="Number of attributes created")
+    reference_count: int = Field(default=0, description="Number of reference values")
+    category_count: int = Field(default=0, description="Number of category paths")
+    output_files: list[str] = Field(default=[], description="Paths to generated files")
+    message: str = Field(default="", description="Summary of what happened")
+    needs_human_input: bool = Field(default=False, description="True if agent needs human help")
+    mapping: list[dict] = Field(default=[], description="Column mappings: [{source_column, target_attribute, attribute_type, ...}]")
+    header_row: int = Field(default=0, description="Row index where column headers were found")
+    data_start_row: int = Field(default=1, description="Row index where actual data starts")
+    profiles: list[dict] = Field(default=[], description="Column profiles")
+    category_hierarchy: list[str] = Field(default=[], description="Category paths")
+    sheet_name: str = Field(default="", description="Sheet name used")
+
+
 class AgentState(MessagesState):
+    structured_response: Optional[IngestionOutput] = None
+    remaining_steps: int = 25
     source_path: str
     sheet_name: Optional[str]
     fingerprint: str
