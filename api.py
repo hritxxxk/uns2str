@@ -569,6 +569,246 @@ async def vingpt_start(req: StartRequest, request: Request):
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
+# ─── Interactive Graph Endpoints ────────────────────────────────
+
+from interactive_graph import interactive_graph
+from interactive_state import InteractiveIngestionState, PhaseOutput
+
+
+class InteractiveStartRequest(BaseModel):
+    file_path: str = Field(description="Path to the source file (CSV, xlsx, xls)")
+    sheet_name: Optional[str] = Field(None, description="Optional sheet name within workbook")
+
+
+class InteractiveRespondRequest(BaseModel):
+    thread_id: str = Field(description="Thread ID from /interactive/start")
+    approved: bool = Field(description="User confirmed this phase's suggestions")
+    feedback: str = Field(default="", description="Optional freeform edits or corrections")
+
+
+def _build_interactive_initial(file_path: str, sheet_name: str | None, jwt: str) -> dict:
+    return {
+        "messages": [],
+        "file_path": file_path,
+        "sheet_name": sheet_name,
+        "profile_data": None,
+        "current_phase": "categories",
+        "phases_completed": [],
+        "categories": PhaseOutput(explanation="", reasoning="", suggestions=[], approved=False, user_feedback=""),
+        "attributes": PhaseOutput(explanation="", reasoning="", suggestions=[], approved=False, user_feedback=""),
+        "references": PhaseOutput(explanation="", reasoning="", suggestions=[], approved=False, user_feedback=""),
+        "products": PhaseOutput(explanation="", reasoning="", suggestions=[], approved=False, user_feedback=""),
+        "core_mappings": {},
+        "custom_mappings": {},
+        "mapping_confidence": {},
+        "generated_files": [],
+        "jwt_token": jwt,
+    }
+
+
+@app.post("/interactive/start")
+async def interactive_start(req: InteractiveStartRequest, request: Request):
+    """Start a new interactive 4-phase onboarding session.
+
+    SSE stream that:
+    1. Runs triage (file profiling) and streams progress events
+    2. Runs the first phase (categories) and streams the phase data
+    3. Closes the stream — client then uses /interactive/respond
+    """
+    if not os.path.exists(req.file_path):
+        raise HTTPException(status_code=404, detail=f"File not found: {req.file_path}")
+
+    auth_header = request.headers.get("authorization", "")
+    thread_id = str(uuid.uuid4())
+    config = {"configurable": {"thread_id": thread_id}}
+
+    async def event_stream():
+        initial = _build_interactive_initial(req.file_path, req.sheet_name, auth_header)
+
+        # Phase 0: triage — stream file profiling progress
+        yield f"data: {json.dumps({'type': 'progress', 'message': 'Opening file...'})}\n\n"
+
+        from graph import triage_source
+
+        ts_state = triage_source({
+            "source_path": req.file_path,
+            "sheet_name": req.sheet_name,
+            "messages": [{"role": "user", "content": "Profile file"}],
+        })
+
+        headers = ts_state.get("headers", [])
+        row_count = ts_state.get("row_count", 0)
+        column_count = ts_state.get("column_count", 0)
+        sheet_name = ts_state.get("sheet_name") or "auto-detected"
+        header_row = ts_state.get("header_row", 0)
+
+        yield f"data: {json.dumps({
+            'type': 'progress',
+            'message': f'I detected {column_count} columns on sheet \"{sheet_name}\" and verified Row {header_row + 1} contains your headers.',
+            'details': {'columns': column_count, 'rows': row_count, 'sheet': sheet_name, 'header_row': header_row},
+        })}\n\n"
+
+        # Seed profile_data into interactive state
+        sample_rows = []
+        try:
+            gen = read_file(req.file_path, sheet_name)
+            dr = ts_state.get("data_start_row", header_row + 1)
+            for _ in range(dr):
+                next(gen, None)
+            sample_rows = take_rows(gen, 5)
+            sample_rows = [
+                {headers[i]: str(row[i])[:60] for i in range(min(len(headers), len(row))) if row[i] is not None and str(row[i]).strip()}
+                for row in sample_rows
+            ]
+        except Exception:
+            pass
+
+        initial["profile_data"] = {
+            "headers": headers,
+            "sample_rows": sample_rows,
+            "row_count": row_count,
+            "column_count": column_count,
+            "header_row": header_row,
+            "data_start_row": ts_state.get("data_start_row", header_row + 1),
+        }
+        initial["profile_data"]["category_hierarchy"] = []
+
+        # Stream the graph — runs triage then hits interrupt on categories
+        yield f"data: {json.dumps({'type': 'progress', 'message': 'Analysing column structure and values...'})}\n\n"
+
+        for event in interactive_graph.stream(initial, config):
+            for node_name, node_data in event.items():
+                if node_name == "__interrupt__":
+                    break
+
+        state_vals = interactive_graph.get_state(config).values
+
+        # Send the categories phase data
+        cat = state_vals.get("categories", {})
+        yield f"data: {json.dumps({
+            'type': 'phase',
+            'phase': 'categories',
+            'thread_id': thread_id,
+            'explanation': cat.get('explanation', ''),
+            'reasoning': cat.get('reasoning', ''),
+            'suggestions': cat.get('suggestions', []),
+            'message': state_vals.get('messages', [{}])[-1].get('content', '') if state_vals.get('messages') else '',
+        })}\n\n"
+
+        logger.info(f"interactive | thread={thread_id} | file={req.file_path} | phase=categories")
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.post("/interactive/respond")
+async def interactive_respond(req: InteractiveRespondRequest, request: Request):
+    """Resume an interactive session with user feedback.
+
+    Accepts the user's approval + optional feedback text, updates the
+    current phase's PhaseOutput, advances to the next phase, and returns
+    the new phase's data (or completion result).
+    """
+    config = {"configurable": {"thread_id": req.thread_id}}
+
+    try:
+        current = interactive_graph.get_state(config)
+    except Exception:
+        raise HTTPException(status_code=404, detail=f"Thread '{req.thread_id}' not found")
+
+    vals = dict(current.values)
+    phase = vals.get("current_phase", "categories")
+
+    if phase == "complete":
+        return {
+            "status": "complete",
+            "thread_id": req.thread_id,
+            "generated_files": vals.get("generated_files", []),
+        }
+
+    # Update the current phase output with user feedback
+    phase_output = dict(vals.get(phase, PhaseOutput(
+        explanation="", reasoning="", suggestions=[], approved=False, user_feedback="",
+    )))
+    phase_output["approved"] = req.approved
+    phase_output["user_feedback"] = req.feedback
+    vals[phase] = PhaseOutput(**phase_output)
+
+    # If approved, advance to next phase. If rejected, stay on same phase with feedback.
+    if req.approved:
+        completed = list(vals.get("phases_completed", []))
+        completed.append(phase)
+        vals["phases_completed"] = completed
+
+        # Map phase names to their next
+        phase_order = ["categories", "attributes", "references", "products", "complete"]
+        idx = phase_order.index(phase)
+        next_phase = phase_order[idx + 1] if idx + 1 < len(phase_order) else "complete"
+        vals["current_phase"] = next_phase
+        logger.info(f"interactive | thread={req.thread_id} | phase={phase} -> {next_phase} | approved")
+    else:
+        logger.info(f"interactive | thread={req.thread_id} | phase={phase} | re-run with feedback")
+
+    # Update state and resume
+    interactive_graph.update_state(config, vals)
+
+    # Stream until next interrupt or completion
+    for event in interactive_graph.stream(None, config):
+        pass
+
+    new_vals = interactive_graph.get_state(config).values
+    new_phase = new_vals.get("current_phase", "complete")
+
+    if new_phase == "complete":
+        # Render is done
+        files = new_vals.get("generated_files", [])
+        return {
+            "status": "complete",
+            "thread_id": req.thread_id,
+            "phase": "complete",
+            "generated_files": files,
+            "message": new_vals.get("messages", [{}])[-1].get("content", "") if new_vals.get("messages") else "",
+        }
+
+    # Return the next phase's data
+    next_output = new_vals.get(new_phase, {})
+    return {
+        "status": "continue",
+        "thread_id": req.thread_id,
+        "phase": new_phase,
+        "explanation": next_output.get("explanation", ""),
+        "reasoning": next_output.get("reasoning", ""),
+        "suggestions": next_output.get("suggestions", []),
+        "message": new_vals.get("messages", [{}])[-1].get("content", "") if new_vals.get("messages") else "",
+    }
+
+
+@app.post("/interactive/status")
+async def interactive_status(req: StatusRequest):
+    """Check the status of an interactive session."""
+    config = {"configurable": {"thread_id": req.thread_id}}
+
+    try:
+        state = interactive_graph.get_state(config)
+    except Exception:
+        return {
+            "status": "not_found",
+            "thread_id": req.thread_id,
+        }
+
+    vals = state.values
+    phase = vals.get("current_phase", "unknown")
+    files = vals.get("generated_files", [])
+
+    return {
+        "status": "complete" if phase == "complete" else "in_progress",
+        "thread_id": req.thread_id,
+        "phase": phase,
+        "phases_completed": vals.get("phases_completed", []),
+        "has_output_files": bool(files),
+        "generated_files": files,
+    }
+
+
 # ─── Run (for development) ──────────────────────────────────────
 
 if __name__ == "__main__":

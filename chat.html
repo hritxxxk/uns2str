@@ -1,0 +1,1017 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>VinAI Data Onboarding</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+<style>
+:root{
+  --bg:#f8f9fc;
+  --white:#ffffff;
+  --border:#e2e5ed;
+  --border-light:#f0f2f6;
+
+  --purple:#7c3aed;
+  --purple-light:#ede9fe;
+  --purple-hover:#6d28d9;
+  --purple-soft:#f5f3ff;
+
+  --text:#1e1e2e;
+  --muted:#6b7280;
+  --muted-light:#9ca3af;
+
+  --green:#10b981;
+  --green-light:#d1fae5;
+  --amber:#f59e0b;
+  --amber-light:#fef3c7;
+
+  --shadow:0 1px 3px rgba(0,0,0,.06), 0 1px 2px rgba(0,0,0,.04);
+  --shadow-lg:0 4px 14px rgba(0,0,0,.08);
+  --radius:12px;
+  --radius-lg:18px;
+}
+
+*{margin:0;padding:0;box-sizing:border-box;}
+
+body{
+  font-family:Inter,-apple-system,sans-serif;
+  background:var(--bg);
+  color:var(--text);
+  height:100vh;
+  overflow:hidden;
+}
+
+/* ── APP LAYOUT ──────────────────────────────────── */
+.app{
+  display:flex;
+  flex-direction:column;
+  height:100vh;
+}
+
+/* ── TOPBAR ──────────────────────────────────────── */
+.topbar{
+  height:60px;
+  border-bottom:1px solid var(--border);
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  padding:0 24px;
+  background:rgba(255,255,255,.85);
+  backdrop-filter:blur(8px);
+  flex-shrink:0;
+}
+.topbar-left{
+  display:flex;
+  align-items:center;
+  gap:12px;
+}
+.topbar-left .logo-badge{
+  width:32px;height:32px;
+  border-radius:8px;
+  background:var(--purple);
+  color:white;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  font-size:15px;
+  flex-shrink:0;
+}
+.topbar-left h3{
+  font-size:15px;
+  font-weight:600;
+}
+.model-pill{
+  background:var(--purple-soft);
+  color:var(--purple);
+  border:1px solid var(--purple-light);
+  padding:4px 10px;
+  border-radius:999px;
+  font-size:11px;
+  font-weight:500;
+}
+
+.topbar-right{
+  display:flex;
+  align-items:center;
+  gap:12px;
+}
+
+.phase-badge-top{
+  font-size:12px;
+  color:var(--muted);
+  font-weight:500;
+}
+
+.new-chat-btn{
+  background:var(--purple);
+  border:none;
+  color:white;
+  height:34px;
+  padding:0 14px;
+  border-radius:8px;
+  font-weight:600;
+  font-size:13px;
+  cursor:pointer;
+  transition:.2s;
+  display:flex;
+  align-items:center;
+  gap:6px;
+}
+.new-chat-btn:hover{background:var(--purple-hover);}
+
+/* ── CHAT FEED ───────────────────────────────────── */
+.chat-feed{
+  flex:1;
+  overflow-y:auto;
+  padding:32px 0 120px;
+  scroll-behavior:smooth;
+}
+.message{
+  display:flex;
+  justify-content:center;
+  padding:0 24px;
+  margin-bottom:28px;
+}
+.message-inner{
+  width:100%;
+  max-width:820px;
+  display:flex;
+  gap:14px;
+}
+.avatar{
+  width:36px;height:36px;
+  border-radius:10px;
+  flex-shrink:0;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  font-weight:700;
+  font-size:12px;
+}
+.ai-avatar{background:var(--purple);color:white;}
+.user-avatar{background:#e5e7eb;color:var(--muted);}
+.content{flex:1;padding-top:4px;min-width:0;}
+.role{font-size:13px;font-weight:600;margin-bottom:6px;}
+.bubble{
+  color:#374151;
+  line-height:1.7;
+  font-size:15px;
+  white-space:pre-wrap;
+}
+.bubble p{margin-bottom:10px;}
+.bubble p:last-child{margin-bottom:0;}
+
+/* ── UPLOAD ZONE ─────────────────────────────────── */
+.upload-zone{
+  border:1.5px dashed var(--border);
+  border-radius:var(--radius-lg);
+  padding:32px 20px;
+  text-align:center;
+  background:var(--white);
+  transition:.2s;
+  cursor:pointer;
+  margin-top:12px;
+}
+.upload-zone:hover{
+  border-color:var(--purple);
+  background:var(--purple-soft);
+}
+.upload-icon{font-size:28px;margin-bottom:8px;}
+.upload-title{font-size:14px;font-weight:600;color:var(--text);}
+.upload-sub{font-size:12px;color:var(--muted);margin-top:4px;}
+
+/* ── PROGRESS ────────────────────────────────────── */
+.progress-card{
+  margin-top:12px;
+  background:var(--white);
+  border:1px solid var(--border);
+  border-radius:var(--radius);
+  padding:14px 16px;
+  display:flex;
+  align-items:center;
+  gap:12px;
+  box-shadow:var(--shadow);
+}
+.progress-spinner{
+  width:18px;height:18px;
+  border:2px solid var(--border);
+  border-top-color:var(--purple);
+  border-radius:50%;
+  animation:spin .8s linear infinite;
+  flex-shrink:0;
+}
+@keyframes spin{to{transform:rotate(360deg)}}
+.progress-text{font-size:13px;color:var(--muted);}
+
+/* ── PHASE CARD ──────────────────────────────────── */
+.phase-card{
+  margin-top:14px;
+  background:var(--white);
+  border:1px solid var(--border);
+  border-radius:var(--radius-lg);
+  overflow:hidden;
+  box-shadow:var(--shadow);
+}
+.phase-header{
+  padding:14px 18px;
+  border-bottom:1px solid var(--border-light);
+  font-weight:600;
+  font-size:14px;
+  display:flex;
+  align-items:center;
+  gap:10px;
+}
+.phase-badge{
+  font-size:11px;
+  background:var(--purple-soft);
+  color:var(--purple);
+  padding:2px 8px;
+  border-radius:999px;
+  font-weight:500;
+}
+.phase-body{padding:16px 18px;}
+
+/* ── SUGGESTION GROUPS ───────────────────────────── */
+.suggestion-group{margin-bottom:16px;}
+.suggestion-group:last-child{margin-bottom:0;}
+.group-header{
+  font-size:12px;
+  font-weight:600;
+  text-transform:uppercase;
+  letter-spacing:.04em;
+  color:var(--muted);
+  margin-bottom:8px;
+  padding-bottom:6px;
+  border-bottom:1px solid var(--border-light);
+}
+.suggestion-item{
+  display:flex;
+  align-items:center;
+  gap:10px;
+  padding:8px 10px;
+  background:var(--bg);
+  border-radius:8px;
+  margin-bottom:6px;
+  font-size:13px;
+}
+.suggestion-item.conf-high{border-left:3px solid var(--green);}
+.suggestion-item.conf-low{border-left:3px solid var(--amber);}
+.suggestion-item .col-name{font-weight:600;flex-shrink:0;}
+.suggestion-item .arrow{color:var(--muted-light);margin:0 6px;}
+.suggestion-item .mapped-to{color:var(--purple);font-weight:500;}
+.suggestion-item .conf-badge{
+  font-size:11px;
+  padding:1px 6px;
+  border-radius:4px;
+  margin-left:auto;
+  flex-shrink:0;
+}
+.conf-high .conf-badge{background:var(--green-light);color:#065f46;}
+.conf-low .conf-badge{background:var(--amber-light);color:#92400e;}
+.suggestion-item .reason{font-size:12px;color:var(--muted);margin-top:2px;}
+
+/* ── REFERENCE ITEM ──────────────────────────────── */
+.ref-item{
+  padding:10px 12px;
+  background:var(--bg);
+  border-radius:8px;
+  margin-bottom:8px;
+}
+.ref-item .ref-header{
+  display:flex;
+  justify-content:space-between;
+  font-size:13px;
+  font-weight:600;
+  margin-bottom:6px;
+}
+.ref-item .ref-values{
+  display:flex;
+  flex-wrap:wrap;
+  gap:4px;
+}
+.ref-item .ref-tag{
+  font-size:11px;
+  background:var(--white);
+  border:1px solid var(--border);
+  padding:2px 6px;
+  border-radius:4px;
+  color:var(--muted);
+}
+.ref-item .ref-tag.messy{
+  background:var(--amber-light);
+  border-color:#fcd34d;
+  color:#92400e;
+  text-decoration:line-through;
+}
+.ref-item .ref-tag.corrected{
+  background:var(--green-light);
+  border-color:#6ee7b7;
+  color:#065f46;
+}
+
+/* ── APPROVE/REJECT BAR ──────────────────────────── */
+.action-bar{
+  margin-top:16px;
+  padding:14px 18px;
+  border-top:1px solid var(--border-light);
+  display:flex;
+  gap:10px;
+  align-items:center;
+  flex-wrap:wrap;
+}
+.btn{
+  padding:8px 18px;
+  border:none;
+  border-radius:8px;
+  font-weight:600;
+  font-size:13px;
+  cursor:pointer;
+  transition:.15s;
+}
+.btn-primary{
+  background:var(--purple);
+  color:white;
+}
+.btn-primary:hover{background:var(--purple-hover);}
+.btn-primary:disabled{background:#c4b5fd;cursor:not-allowed;}
+.btn-secondary{
+  background:var(--bg);
+  color:var(--text);
+  border:1px solid var(--border);
+}
+.btn-secondary:hover{background:#e5e7eb;}
+.btn-secondary:disabled{opacity:.5;cursor:not-allowed;}
+.feedback-input{
+  flex:1;
+  min-width:200px;
+  padding:8px 12px;
+  border:1px solid var(--border);
+  border-radius:8px;
+  font-size:13px;
+  font-family:inherit;
+  outline:none;
+  background:var(--white);
+}
+.feedback-input:focus{border-color:var(--purple);}
+
+/* ── DOWNLOAD CARD ───────────────────────────────── */
+.download-card{
+  margin-top:14px;
+  background:var(--white);
+  border:1px solid var(--border);
+  border-radius:var(--radius-lg);
+  overflow:hidden;
+  box-shadow:var(--shadow);
+}
+.download-header{
+  padding:14px 18px;
+  border-bottom:1px solid var(--border-light);
+  font-weight:600;
+  font-size:14px;
+}
+.download-item{
+  display:flex;
+  align-items:center;
+  padding:10px 18px;
+  gap:12px;
+  border-bottom:1px solid var(--border-light);
+}
+.download-item:last-child{border-bottom:none;}
+.download-item .file-icon{font-size:20px;}
+.download-item .file-info{flex:1;}
+.download-item .file-name{font-size:13px;font-weight:500;}
+.download-item .file-size{font-size:11px;color:var(--muted);}
+
+/* ── INPUT BAR ───────────────────────────────────── */
+.input-wrap{
+  position:fixed;
+  bottom:0;
+  left:0;
+  right:0;
+  padding:20px 24px 24px;
+  background:linear-gradient(
+    to top,
+    rgba(248,249,252,1) 50%,
+    rgba(248,249,252,0) 100%
+  );
+  pointer-events:none;
+}
+.input-box{
+  max-width:820px;
+  margin:auto;
+  background:var(--white);
+  border:1px solid var(--border);
+  border-radius:var(--radius-lg);
+  display:flex;
+  align-items:flex-end;
+  padding:12px 14px;
+  gap:10px;
+  box-shadow:var(--shadow-lg);
+  pointer-events:auto;
+}
+.input-box textarea{
+  flex:1;
+  background:transparent;
+  border:none;
+  resize:none;
+  outline:none;
+  color:var(--text);
+  font-family:inherit;
+  font-size:14px;
+  max-height:120px;
+  line-height:1.5;
+}
+.input-box textarea::placeholder{color:var(--muted-light);}
+.input-box textarea:disabled{opacity:.5;}
+.send-btn{
+  width:38px;height:38px;
+  border:none;
+  border-radius:10px;
+  background:var(--purple);
+  color:white;
+  cursor:pointer;
+  font-size:15px;
+  flex-shrink:0;
+  transition:.15s;
+}
+.send-btn:hover{background:var(--purple-hover);}
+.send-btn:disabled{background:#d1d5db;cursor:not-allowed;}
+
+/* ── STATUS BAR ──────────────────────────────────── */
+.status-bar{
+  text-align:center;
+  padding:6px 16px;
+  font-size:12px;
+  color:var(--muted);
+  display:none;
+}
+.status-bar.show{display:block;}
+.status-bar.error{color:#ef4444;}
+
+@media(max-width:768px){
+  .message{padding:0 16px;}
+  .input-wrap{padding:16px;}
+  .topbar{padding:0 16px;}
+  .new-chat-btn span{display:none;}
+}
+</style>
+</head>
+<body>
+
+<div class="app">
+
+  <!-- TOPBAR -->
+  <header class="topbar">
+    <div class="topbar-left">
+      <div class="logo-badge">✦</div>
+      <h3>VinAI Onboarding</h3>
+      <span class="model-pill">Interactive 4-Phase</span>
+    </div>
+    <div class="topbar-right">
+      <span id="phaseIndicator" class="phase-badge-top"></span>
+      <button class="new-chat-btn" onclick="resetChat()">
+        <span>+</span> <span>New</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- CHAT FEED -->
+  <main class="chat-feed" id="chatFeed"></main>
+
+  <!-- INPUT BAR -->
+  <div class="input-wrap" id="inputBar">
+    <div class="input-box">
+      <textarea id="chatInput" rows="1" placeholder="Type your response or file path..." disabled></textarea>
+      <button class="send-btn" id="sendBtn" disabled>↑</button>
+    </div>
+  </div>
+
+  <!-- STATUS BAR -->
+  <div class="status-bar" id="statusBar"></div>
+
+</div>
+
+<script>
+// ─── STATE ─────────────────────────────────────────
+const STATE = {
+  threadId: null,
+  currentPhase: null,
+  phasesCompleted: [],
+  isStreaming: false,
+  isAwaitingFeedback: false,
+  conversation: [],
+};
+
+// ─── DOM REFS ─────────────────────────────────────
+const chatFeed = document.getElementById('chatFeed');
+const chatInput = document.getElementById('chatInput');
+const sendBtn = document.getElementById('sendBtn');
+const statusBar = document.getElementById('statusBar');
+const phaseIndicator = document.getElementById('phaseIndicator');
+
+// ─── UTILITY ──────────────────────────────────────
+function scrollToBottom() {
+  setTimeout(() => { chatFeed.scrollTop = chatFeed.scrollHeight; }, 50);
+}
+
+function status(msg, isError = false) {
+  statusBar.textContent = msg;
+  statusBar.className = 'status-bar show' + (isError ? ' error' : '');
+}
+
+function setInputEnabled(enabled) {
+  chatInput.disabled = !enabled;
+  sendBtn.disabled = !enabled;
+  chatInput.placeholder = enabled
+    ? 'Type your response or file path...'
+    : 'Processing...';
+}
+
+function addMessage(role, html, extra) {
+  const div = document.createElement('div');
+  div.className = 'message';
+  div.innerHTML = `
+    <div class="message-inner">
+      <div class="avatar ${role === 'ai' ? 'ai-avatar' : 'user-avatar'}">
+        ${role === 'ai' ? 'AI' : 'U'}
+      </div>
+      <div class="content">
+        <div class="role">${role === 'ai' ? 'VinAI Assistant' : 'You'}</div>
+        <div class="bubble">${html}</div>
+        ${extra || ''}
+      </div>
+    </div>
+  `;
+  chatFeed.appendChild(div);
+  scrollToBottom();
+  STATE.conversation.push({ role, html, extra });
+  return div;
+}
+
+function addProgress(text) {
+  const div = document.createElement('div');
+  div.className = 'message';
+  div.innerHTML = `
+    <div class="message-inner">
+      <div class="avatar ai-avatar">AI</div>
+      <div class="content">
+        <div class="progress-card">
+          <div class="progress-spinner"></div>
+          <div class="progress-text">${text}</div>
+        </div>
+      </div>
+    </div>
+  `;
+  chatFeed.appendChild(div);
+  scrollToBottom();
+  return div;
+}
+
+function removeProgress() {
+  const msgs = chatFeed.querySelectorAll('.message');
+  for (const m of msgs) {
+    if (m.querySelector('.progress-card')) {
+      m.remove();
+      break;
+    }
+  }
+}
+
+// ─── SUGGESTION RENDERERS ─────────────────────────
+
+function renderSuggestions(suggestions) {
+  if (!suggestions || !suggestions.length) return '';
+
+  let html = '<div class="suggestion-group">';
+  const hasGroups = suggestions.some(s => s.type === 'group');
+
+  if (hasGroups) {
+    for (const group of suggestions) {
+      html += `<div class="group-header">${group.label || 'Suggestions'}</div>`;
+      if (group.items) {
+        for (const item of group.items) {
+          html += renderSuggestionItem(item);
+        }
+      }
+    }
+  } else {
+    for (const item of suggestions) {
+      html += renderSuggestionItem(item);
+    }
+  }
+
+  html += '</div>';
+  return html;
+}
+
+function renderSuggestionItem(item) {
+  if (item.type === 'group') {
+    let g = `<div class="group-header">${item.label || 'Group'}</div>`;
+    if (item.items) {
+      for (const sub of item.items) {
+        g += renderSuggestionItem(sub);
+      }
+    }
+    return g;
+  }
+
+  const conf = item.confidence || 0;
+  const confClass = conf >= 80 ? 'conf-high' : 'conf-low';
+  const mappedTo = item.mapped_to || '';
+  const column = item.column || '';
+
+  if (!column && !item.mapped_to && item.label) {
+    return `
+      <div class="suggestion-item ${confClass}">
+        <span class="col-name">${item.label}</span>
+        ${item.column_hint ? `<span class="reason">(from ${item.column_hint})</span>` : ''}
+        <span class="conf-badge">${conf}%</span>
+      </div>
+    `;
+  }
+
+  return `
+    <div class="suggestion-item ${confClass}">
+      <span class="col-name">${column || '—'}</span>
+      ${mappedTo ? `<span class="arrow">→</span><span class="mapped-to">${mappedTo}</span>` : ''}
+      <span class="conf-badge">${conf}%</span>
+      ${item.reasoning ? `<div class="reason">${item.reasoning}</div>` : ''}
+    </div>
+  `;
+}
+
+function renderReferenceItems(suggestions) {
+  if (!suggestions || !suggestions.length) return '';
+  let html = '<div class="suggestion-group">';
+  for (const ref of suggestions) {
+    const vals = ref.values || [];
+    const messy = ref.messy_values || [];
+
+    html += `<div class="ref-item">
+      <div class="ref-header">
+        <span>${ref.label || ref.column || '—'}</span>
+        <span style="font-weight:400;color:var(--muted);font-size:12px;">${ref.unique_count || vals.length} unique</span>
+      </div>
+      <div class="ref-values">`;
+
+    for (const v of vals) {
+      const isMessy = messy.includes(v);
+      html += `<span class="ref-tag ${isMessy ? 'messy' : ''}">${v}</span>`;
+    }
+
+    html += `</div></div>`;
+  }
+  html += '</div>';
+  return html;
+}
+
+function renderPhaseCard(phase, explanation, suggestions, reasoning) {
+  const phaseNames = {
+    categories: '1\uFE0F\u20E3 Categories',
+    attributes: '2\uFE0F\u20E3 Attributes',
+    references: '3\uFE0F\u20E3 Reference Masters',
+    products: '4\uFE0F\u20E3 Products',
+  };
+  const phaseTitle = phaseNames[phase] || phase;
+
+  let bodyHtml = '';
+
+  if (explanation) {
+    bodyHtml += `<div class="bubble" style="margin-bottom:14px;">${explanation}</div>`;
+  }
+
+  if (suggestions && suggestions.length) {
+    if (phase === 'references') {
+      bodyHtml += renderReferenceItems(suggestions);
+    } else {
+      bodyHtml += renderSuggestions(suggestions);
+    }
+  }
+
+  if (reasoning) {
+    bodyHtml += `
+      <details style="margin-top:12px;">
+        <summary style="font-size:12px;color:var(--muted);cursor:pointer;">Why I chose this</summary>
+        <div style="font-size:12px;color:var(--muted);margin-top:6px;line-height:1.6;white-space:pre-wrap;">${reasoning}</div>
+      </details>
+    `;
+  }
+
+  bodyHtml += `
+    <div class="action-bar">
+      <button class="btn btn-primary" onclick="approvePhase(true)">\u2713 Looks Good</button>
+      <button class="btn btn-secondary" onclick="approvePhase(false)">\u2717 Let me adjust</button>
+      <input class="feedback-input" id="feedbackInput" placeholder="Optional: tell me what to change..." />
+    </div>
+  `;
+
+  return `
+    <div class="phase-card">
+      <div class="phase-header">
+        ${phaseTitle}
+        <span class="phase-badge">Awaiting Review</span>
+      </div>
+      <div class="phase-body">${bodyHtml}</div>
+    </div>
+  `;
+}
+
+function renderDownloadCard(files) {
+  if (!files || !files.length) return '';
+  const fileNames = files.map(f => {
+    const name = f.split('/').pop() || f;
+    return { name, path: f };
+  });
+
+  let items = fileNames.map(f => `
+    <div class="download-item">
+      <span class="file-icon">📄</span>
+      <div class="file-info">
+        <div class="file-name">${f.name}</div>
+      </div>
+      <a href="/output/${f.name}" class="btn btn-primary" style="font-size:12px;padding:6px 14px;text-decoration:none;" download>Download</a>
+    </div>
+  `).join('');
+
+  return `
+    <div class="download-card">
+      <div class="download-header">✅ Generated PIM Templates</div>
+      ${items}
+    </div>
+  `;
+}
+
+// ─── START ONBOARDING (SSE) ───────────────────────
+
+function startOnboarding(filePath, sheetName) {
+  STATE.isStreaming = true;
+  setInputEnabled(false);
+  status('Starting onboarding...');
+
+  addMessage('user', `📁 Onboarding file: <strong>${filePath}</strong>${sheetName ? ` (sheet: ${sheetName})` : ''}`);
+
+  fetch('/interactive/start', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ file_path: filePath, sheet_name: sheetName || null }),
+  }).then(async (response) => {
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const data = JSON.parse(line.slice(6));
+
+        if (data.type === 'progress') {
+          removeProgress();
+          addProgress(data.message);
+          if (data.details) {
+            phaseIndicator.textContent = `📊 ${data.details.columns} cols · ${data.details.rows} rows`;
+          }
+        } else if (data.type === 'phase') {
+          removeProgress();
+          STATE.threadId = data.thread_id;
+          STATE.currentPhase = data.phase;
+          STATE.isStreaming = false;
+
+          addMessage('ai', '', renderPhaseCard(
+            data.phase,
+            data.message || data.explanation,
+            data.suggestions,
+            data.reasoning,
+          ));
+
+          phaseIndicator.textContent = `📍 Phase: ${data.phase}`;
+          STATE.isAwaitingFeedback = true;
+          setInputEnabled(true);
+          status('');
+          chatInput.focus();
+        }
+      }
+    }
+  }).catch(err => {
+    removeProgress();
+    status('Connection error: ' + err.message, true);
+    STATE.isStreaming = false;
+    setInputEnabled(true);
+  });
+}
+
+// ─── APPROVE / REJECT ─────────────────────────────
+
+async function approvePhase(approved) {
+  if (!STATE.threadId || !STATE.currentPhase) return;
+
+  const feedback = document.getElementById('feedbackInput')?.value || '';
+  STATE.isAwaitingFeedback = false;
+  STATE.isStreaming = true;
+  setInputEnabled(false);
+  status(approved ? 'Processing approval...' : 'Applying feedback...');
+
+  const label = approved ? '\u2713 Approved' : '\u2717 Needs adjustment';
+  addMessage('user', `${label}${feedback ? ': ' + feedback : ''}`);
+
+  document.querySelectorAll('.action-bar .btn').forEach(b => b.disabled = true);
+
+  try {
+    const resp = await fetch('/interactive/respond', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        thread_id: STATE.threadId,
+        approved: approved,
+        feedback: feedback,
+      }),
+    });
+
+    const result = await resp.json();
+
+    if (result.status === 'complete') {
+      STATE.currentPhase = 'complete';
+      addMessage('ai', result.message || 'All done!', renderDownloadCard(result.generated_files || []));
+      phaseIndicator.textContent = '✅ Complete';
+      status('');
+      setInputEnabled(true);
+    } else if (result.status === 'continue') {
+      STATE.currentPhase = result.phase;
+      STATE.phasesCompleted.push(result.phase);
+
+      addMessage('ai', '', renderPhaseCard(
+        result.phase,
+        result.message || result.explanation,
+        result.suggestions,
+        result.reasoning,
+      ));
+
+      phaseIndicator.textContent = `📍 Phase: ${result.phase}`;
+      STATE.isAwaitingFeedback = true;
+      setInputEnabled(true);
+      status('');
+      chatInput.focus();
+    } else {
+      status('Unexpected response', true);
+      setInputEnabled(true);
+    }
+  } catch (err) {
+    status('Error: ' + err.message, true);
+    setInputEnabled(true);
+  }
+
+  STATE.isStreaming = false;
+}
+
+// ─── FILE SELECTION ────────────────────────────────
+
+function showFilePicker() {
+  addMessage('ai', `
+    👋 Hi! I'm ready to help you onboard your product data into the PIM.
+
+    <p>We'll work through <strong>4 steps</strong> together:</p>
+    <p>
+    1️⃣ <strong>Categories</strong> — I'll discover your product hierarchy<br>
+    2️⃣ <strong>Attributes</strong> — I'll map your columns to PIM fields<br>
+    3️⃣ <strong>Reference Masters</strong> — I'll extract dropdown values<br>
+    4️⃣ <strong>Products</strong> — I'll compile the final template
+    </p>
+    <p>Just tell me the path to your data file to get started!</p>
+  `);
+
+  const fileCard = document.createElement('div');
+  fileCard.className = 'message';
+  fileCard.innerHTML = `
+    <div class="message-inner">
+      <div class="avatar user-avatar">U</div>
+      <div class="content">
+        <div class="upload-zone" onclick="document.getElementById('fileInput').click()">
+          <div class="upload-icon">📂</div>
+          <div class="upload-title">Click to select a file</div>
+          <div class="upload-sub">Or type the server path below</div>
+          <input type="file" id="fileInput" style="display:none" accept=".csv,.xlsx,.xls" />
+          <div style="margin-top:12px;display:flex;gap:8px;max-width:500px;margin-left:auto;margin-right:auto;">
+            <input type="text" id="filePathInput" placeholder="e.g. /data/export.xlsx" style="flex:1;padding:8px 12px;border:1px solid var(--border);border-radius:8px;font-size:13px;font-family:inherit;outline:none;" />
+            <button class="btn btn-primary" onclick="handleFileSubmit()">Start</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+  chatFeed.appendChild(fileCard);
+  scrollToBottom();
+
+  document.getElementById('fileInput').addEventListener('change', (e) => {
+    if (e.target.files.length) {
+      document.getElementById('filePathInput').value = e.target.files[0].name;
+    }
+  });
+}
+
+function handleFileSubmit() {
+  const pathInput = document.getElementById('filePathInput');
+  const path = pathInput ? pathInput.value.trim() : '';
+  if (!path) {
+    status('Please enter a file path', true);
+    return;
+  }
+
+  const pickerCard = document.querySelector('.upload-zone')?.closest('.message');
+  if (pickerCard) pickerCard.remove();
+
+  const greeting = chatFeed.querySelector('.message:first-child .bubble');
+  if (greeting && greeting.textContent.includes('ready to help')) {
+    // Keep the greeting, remove the picker
+  }
+
+  startOnboarding(path, '');
+}
+
+// ─── CHAT INPUT ────────────────────────────────────
+
+chatInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    handleChatSend();
+  }
+});
+
+sendBtn.addEventListener('click', handleChatSend);
+
+function handleChatSend() {
+  const text = chatInput.value.trim();
+  if (!text) return;
+
+  if (STATE.isAwaitingFeedback) {
+    const fb = document.getElementById('feedbackInput');
+    if (fb) {
+      fb.value = text;
+      const affirmWords = ['yes', 'looks good', 'correct', 'fine', 'proceed', 'approve', '\u2713'];
+      const isAffirm = affirmWords.some(w => text.toLowerCase().includes(w));
+      approvePhase(isAffirm);
+    }
+    chatInput.value = '';
+    return;
+  }
+
+  if (!STATE.threadId) {
+    if (text.includes('.') || text.includes('/') || text.includes('\\')) {
+      document.getElementById('filePathInput').value = text;
+      handleFileSubmit();
+    } else {
+      addMessage('user', text);
+      addMessage('ai', 'I need a file path to get started. Please provide the path to your CSV or XLSX file.');
+    }
+    chatInput.value = '';
+    return;
+  }
+
+  addMessage('user', text);
+  chatInput.value = '';
+
+  const fb = document.getElementById('feedbackInput');
+  if (fb && STATE.isAwaitingFeedback) {
+    fb.value = text;
+  }
+}
+
+// ─── RESET ─────────────────────────────────────────
+
+function resetChat() {
+  STATE.threadId = null;
+  STATE.currentPhase = null;
+  STATE.phasesCompleted = [];
+  STATE.isStreaming = false;
+  STATE.isAwaitingFeedback = false;
+  STATE.conversation = [];
+
+  chatFeed.innerHTML = '';
+  phaseIndicator.textContent = '';
+  status('');
+  setInputEnabled(false);
+
+  showFilePicker();
+}
+
+// ─── INIT ──────────────────────────────────────────
+
+document.addEventListener('DOMContentLoaded', () => {
+  chatInput.addEventListener('input', () => {
+    chatInput.style.height = 'auto';
+    chatInput.style.height = Math.min(chatInput.scrollHeight, 120) + 'px';
+  });
+
+  showFilePicker();
+});
+</script>
+
+</body>
+</html>
