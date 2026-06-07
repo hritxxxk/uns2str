@@ -355,6 +355,281 @@ Return JSON: {{"multi_value_separator": str or null, "path_separator": str, "spl
     return paths if len(paths) >= 2 else None
 
 
+# ─── Declarative Recipe Strategy ──────────────────────────────
+
+def _strategy_declarative_recipe(state):
+    """Primary strategy: LLM writes a declarative recipe, Python executes it on 100% of rows.
+
+    Handles 4 extraction modes:
+    - level_columns: CATEGORY1, CATEGORY2 → path per row (handles empty middle levels)
+    - synthesized: Department + Gender → "Activewear > Women"
+    - lookup: Code "F-SH-01" → resolved from another sheet
+    - single_column: "Category > Subcategory" → parsed by separator
+
+    Self-healing pass merges near-duplicates ("Apperal" → "Apparel").
+    """
+    headers = state.get("headers", [])
+    if not headers:
+        return None
+
+    # ── Profile columns with unique counts & samples ───────────
+    rows = list(read_file(state["source_path"], state.get("sheet_name")))
+    hr = state.get("header_row", 0)
+    dr = state.get("data_start_row", hr + 1)
+    if dr < hr + 1:
+        dr = hr + 1
+    data = rows[dr:]
+
+    col_profiles = []
+    for i, h in enumerate(headers):
+        vals = [str(row[i]).strip() for row in data
+                if i < len(row) and row[i] is not None and str(row[i]).strip()]
+        if vals:
+            unique = sorted(set(vals))
+            col_profiles.append({
+                "name": h,
+                "unique_count": len(unique),
+                "samples": unique[:5],
+                "non_null": len(vals),
+            })
+
+    # ── Check if any other sheets exist for lookup ─────────────
+    other_sheets = []
+    ext = os.path.splitext(state["source_path"])[1].lower()
+    if ext in (".xlsx", ".xls"):
+        try:
+            wb = openpyxl.load_workbook(state["source_path"], read_only=True, data_only=True)
+            other_sheets = [s for s in wb.sheetnames if s != state.get("sheet_name")]
+            wb.close()
+        except Exception:
+            pass
+
+    # ── LLM writes the recipe ──────────────────────────────────
+    prompt = f"""You are a category extraction expert. Analyze these column profiles and decide the best way to extract a clean product category hierarchy.
+
+File: {os.path.basename(state['source_path'])}
+Current sheet: {state.get('sheet_name', 'auto')}
+Other sheets available: {other_sheets if other_sheets else 'none'}
+Columns profiled ({len(col_profiles)} total):
+{json.dumps(col_profiles[:40], indent=2)}
+
+Edge cases to consider:
+1. Missing middle levels (e.g. "Apparel > > t-shirts" — skip the empty level)
+2. Categories spread across columns (e.g. Department + Gender → "Activewear > Women")
+3. Category codes that need lookup (e.g. "F-SH-01" needs resolution from another sheet)
+4. Single column with path separators (e.g. "Apparel/Mens/T-Shirts")
+5. No obvious category columns — infer from attribute columns
+
+Return a JSON recipe:
+{{
+  "strategy": "level_columns" | "synthesized" | "lookup" | "single_column" | "infer_from_attributes",
+  "hierarchy_columns": ["col1", "col2", ...],
+  "separator": " > ",
+  "skip_empty_levels": true,
+  "default_fill": "",
+  "multi_value_separator": null,
+  "path_separator": ">",
+  "synthesize_with": null,
+  "lookup_sheet": null,
+  "lookup_code_column": null,
+  "lookup_value_column": null,
+  "lookup_path_separator": " > ",
+  "conversational_explanation": "A short user-facing explanation of how I determined the hierarchy."
+}}
+
+Strategy rules:
+- level_columns: Use when you see multiple columns like CATEGORY1-4 forming a hierarchy. hierarchy_columns = the level columns in order.
+- synthesized: Use when no single category column exists but Department + Gender etc. can be joined. synthesize_with = joining word like " - ".
+- lookup: Use when a column has short codes (F-SH-01). Set lookup_sheet + code/value columns.
+- single_column: Use when one column contains paths like "Apparel > Mens > T-Shirts". Set path_separator and optionally multi_value_separator.
+- infer_from_attributes: Last resort — pick columns that seem hierarchical. May use only 1 column.
+
+IMPORTANT: skip_empty_levels=true handles the dirty intermediate case — empty/missing cells between valid levels are collapsed."""
+    
+    resp = client.models.generate_content(
+        model="gemini-2.5-flash-lite",
+        contents=prompt,
+        config={"response_mime_type": "application/json"},
+    )
+    recipe = _safe_json_parse(resp.text)
+    if isinstance(recipe, list):
+        recipe = recipe[0] if recipe else {}
+
+    strategy = recipe.get("strategy", "level_columns")
+    hierarchy_cols = recipe.get("hierarchy_columns", [])
+    sep = recipe.get("separator", " > ")
+    skip_empty = recipe.get("skip_empty_levels", True)
+    default_fill = recipe.get("default_fill", "")
+    multi_sep = recipe.get("multi_value_separator")
+    path_sep = recipe.get("path_separator", ">")
+
+    if not hierarchy_cols:
+        return None
+
+    # ── Execute the recipe on 100% of rows ─────────────────────
+    paths = set()
+
+    if strategy == "level_columns":
+        col_indices = [headers.index(c) for c in hierarchy_cols if c in headers]
+        if len(col_indices) < 2:
+            return None
+        for row in data:
+            parts = []
+            for idx in col_indices:
+                val = str(row[idx]).strip() if idx < len(row) and row[idx] is not None else ""
+                if skip_empty and not val:
+                    continue
+                if val:
+                    parts.append(val)
+                elif not skip_empty and default_fill:
+                    parts.append(default_fill)
+            if len(parts) >= 2:
+                paths.add(sep.join(parts))
+
+    elif strategy == "synthesized":
+        col_indices = [headers.index(c) for c in hierarchy_cols if c in headers]
+        if len(col_indices) < 2:
+            return None
+        join_sep = recipe.get("synthesize_with", " - ") or " - "
+        for row in data:
+            parts = []
+            for idx in col_indices:
+                val = str(row[idx]).strip() if idx < len(row) and row[idx] is not None else ""
+                if val:
+                    parts.append(val)
+            if len(parts) >= 2:
+                paths.add(sep.join(parts))
+
+    elif strategy == "lookup":
+        lookup_sheet = recipe.get("lookup_sheet")
+        code_col = recipe.get("lookup_code_column", hierarchy_cols[0]) if hierarchy_cols else None
+        val_col = recipe.get("lookup_value_column", "category_path")
+        lookup_sep = recipe.get("lookup_path_separator", " > ")
+
+        # Build lookup map from the other sheet
+        lookup_map = {}
+        if lookup_sheet and other_sheets:
+            try:
+                wb = openpyxl.load_workbook(state["source_path"], read_only=True, data_only=True)
+                if lookup_sheet in wb.sheetnames:
+                    ws = wb[lookup_sheet]
+                    lookup_headers = [str(c) if c else "" for c in next(ws.iter_rows(max_row=1, values_only=True))]
+                    code_idx = 0  # default first col
+                    val_idx = 1   # default second col
+                    for ci, lh in enumerate(lookup_headers):
+                        lh_lower = lh.lower().strip()
+                        if "code" in lh_lower or "id" in lh_lower:
+                            code_idx = ci
+                        if "path" in lh_lower or "category" in lh_lower or "value" in lh_lower or "name" in lh_lower:
+                            val_idx = ci
+                    for lookup_row in ws.iter_rows(min_row=2, values_only=True):
+                        code = str(lookup_row[code_idx]).strip() if code_idx < len(lookup_row) and lookup_row[code_idx] else ""
+                        val = str(lookup_row[val_idx]).strip() if val_idx < len(lookup_row) and lookup_row[val_idx] else ""
+                        if code and val:
+                            lookup_map[code] = val
+                wb.close()
+            except Exception:
+                pass
+
+        col_idx = headers.index(code_col) if code_col in headers else 0
+        for row in data:
+            code = str(row[col_idx]).strip() if col_idx < len(row) and row[col_idx] is not None else ""
+            if code in lookup_map:
+                paths.add(lookup_map[code])
+            elif code:
+                # If code not in lookup, keep raw as fallback
+                paths.add(code)
+
+    elif strategy == "single_column":
+        cat_col = next((i for i, h in enumerate(headers) if h in hierarchy_cols or h.lower() in ("category", "categories", "product type")), None)
+        if cat_col is None:
+            return None
+        split_cells = recipe.get("split_cells", False)
+        for row in data:
+            val = str(row[cat_col]).strip() if cat_col < len(row) and row[cat_col] is not None else ""
+            if not val:
+                continue
+            if split_cells and multi_sep and multi_sep in val:
+                for chunk in val.split(multi_sep):
+                    chunk = chunk.strip()
+                    if not chunk:
+                        continue
+                    if path_sep in chunk:
+                        parts = [p.strip() for p in chunk.split(path_sep) if p.strip()]
+                        if len(parts) >= 2:
+                            paths.add(sep.join(parts))
+            elif path_sep in val:
+                parts = [p.strip() for p in val.split(path_sep) if p.strip()]
+                if len(parts) >= 2:
+                    paths.add(sep.join(parts))
+
+    elif strategy == "infer_from_attributes":
+        col_indices = [headers.index(c) for c in hierarchy_cols if c in headers]
+        if len(col_indices) < 2:
+            return None
+        for row in data:
+            parts = [str(row[idx]).strip() for idx in col_indices
+                     if idx < len(row) and row[idx] is not None and str(row[idx]).strip()]
+            if len(parts) >= 2:
+                paths.add(sep.join(parts))
+
+    if len(paths) < 2:
+        return None
+
+    # ── Self-healing: normalize near-duplicates ────────────────
+    healed = _heal_category_paths(paths)
+    state["category_reasoning"] = recipe.get("conversational_explanation", "Discovered from column analysis.")
+    return healed
+
+
+# ─── Self-Healing ───────────────────────────────────────────────
+
+def _heal_category_paths(paths: set, threshold: float = 0.85) -> list:
+    """Fuzzy-merge near-duplicate category paths.
+
+    Uses simple token overlap + case normalization.
+    "Apperal > Mens > T-Shirts" and "Apparel > Men > T-Shirts"
+    → "Apparel > Men > T-Shirts" (most common spelling wins).
+    """
+    import re as _re
+
+    def tokenize(p: str) -> list[str]:
+        return _re.sub(r'\s+', ' ', p.strip().lower()).split(" > ")
+
+    def overlap(a: list[str], b: list[str]) -> float:
+        if not a or not b or len(a) != len(b):
+            return 0.0
+        matches = sum(1 for i in range(len(a)) if a[i] == b[i] or
+                      (len(a[i]) > 2 and len(b[i]) > 2 and
+                       (a[i].startswith(b[i]) or b[i].startswith(a[i]) or
+                        (len(set(a[i]) & set(b[i])) / max(len(set(a[i]) | set(b[i])), 1) > 0.7))))
+        return matches / len(a)
+
+    sorted_paths = sorted(paths)
+    merged = []
+    used = set()
+
+    for i, p in enumerate(sorted_paths):
+        if i in used:
+            continue
+        group = [p]
+        used.add(i)
+        tok_i = tokenize(p)
+        for j in range(i + 1, len(sorted_paths)):
+            if j in used:
+                continue
+            tok_j = tokenize(sorted_paths[j])
+            if len(tok_i) == len(tok_j) and overlap(tok_i, tok_j) >= threshold:
+                group.append(sorted_paths[j])
+                used.add(j)
+
+        # Pick the longest/most common form as canonical
+        canonical = max(set(group), key=lambda x: (len(x), group.count(x)))
+        merged.append(canonical)
+
+    return sorted(merged)
+
+
 def _strategy_infer_from_attributes(state):
     headers = state.get("headers", [])
     sample = state.get("sample_rows", [{}])[0] if state.get("sample_rows") else {}
@@ -392,6 +667,7 @@ Columns:
 
 def resolve_category_paths(state):
     strategies = [
+        ("Declarative recipe (AI-generated)", _strategy_declarative_recipe),
         ("Hierarchy sheet", _strategy_hierarchy_sheet),
         ("Level columns (CATEGORY1-4)", _strategy_level_columns),
         ("Single category column", _strategy_single_column),

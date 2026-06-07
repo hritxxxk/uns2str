@@ -174,81 +174,81 @@ def triage_interactive(state: InteractiveIngestionState) -> dict:
 
 # ─── Categories Phase Node ───────────────────────────────────────
 
-CATEGORIES_PROMPT = """You are a VinAI PIM onboarding assistant profiling a product file.
+# ─── Categories Phase Node ───────────────────────────────────────
 
-Current phase: Category Discovery
-
-File: {filename}
-Headers: {headers}
-Sample data (first 3 rows):
-{samples}
-
-The user's feedback from the previous attempt (if any):
-{feedback}
-
-Your job:
-1. Identify which columns form a category hierarchy (broad → narrow grouping).
-   Look for columns like Department, Category, Subcategory, Type, Class, etc.
-   Exclude identifiers (SKU, codes, IDs), prices, descriptions, images.
-2. Explain WHY you chose those columns — be transparent about your reasoning.
-3. List the unique category paths you found (e.g. "Footwear > Women > Heels").
-4. If there is user feedback, incorporate it.
-
-Return JSON:
-{{
-  "explanation": "A friendly paragraph explaining what you found and why.",
-  "reasoning": "Technical breakdown of the columns and values you analysed.",
-  "suggestions": [
-    {{
-      "type": "item",
-      "label": "Footwear > Women > Heels",
-      "column_hint": "Derived from 'Category' + 'Subcategory' columns",
-      "confidence": 95,
-      "reasoning": "These columns form a clear parent→child hierarchy"
-    }}
-  ]
-}}
-
-IMPORTANT: suggestion.type must be "item" for each category path.
-confidence is 0-100.
-"""
+# The actual category logic lives in agents.py (resolve_category_paths).
+# This node delegates to it, then wraps the result in a PhaseOutput.
 
 
 def categories_phase(state: InteractiveIngestionState) -> dict:
+    """Resolve category taxonomy via declarative recipe strategy from agents.py.
+
+    Uses the new _strategy_declarative_recipe (primary) which:
+    1. Profiles columns with unique counts
+    2. Asks LLM to write a declarative parsing recipe
+    3. Executes the recipe on 100% of rows (deterministic)
+    4. Self-heals near-duplicates
+
+    Falls back to the existing 4-strategy chain if the recipe approach
+    doesn't yield valid paths.
+    """
     profile = state.get("profile_data", {})
     headers = profile.get("headers", [])
-    row_count = profile.get("row_count", 0)
     feedback = state.get("categories", {}).get("user_feedback", "")
 
-    # Read sample data
-    gen = read_file(state["file_path"], state.get("sheet_name"))
-    hr = profile.get("header_row", 0)
-    dr = profile.get("data_start_row", hr + 1)
-    for _ in range(dr):
-        try:
-            next(gen)
-        except StopIteration:
-            break
-    sample_rows = take_rows(gen, 5)
-    samples = []
-    for row in sample_rows:
-        s = {}
-        for i, h in enumerate(headers):
-            if i < len(row) and row[i] is not None and str(row[i]).strip():
-                s[h] = str(row[i]).strip()[:60]
-        samples.append(s)
+    # Build a temporary state dict for agents.resolve_category_paths
+    # It expects: source_path, sheet_name, headers, header_row, data_start_row
+    cat_state = {
+        "source_path": state["file_path"],
+        "sheet_name": state.get("sheet_name"),
+        "headers": headers,
+        "header_row": profile.get("header_row", 0),
+        "data_start_row": profile.get("data_start_row", 1),
+        "category_candidates": [],
+        "category_path_config": {},
+        "category_hierarchy": [],
+        "need_user_input": False,
+        "is_known_schema": False,
+        "mapping": [],
+        "sample_rows": [],
+        "row_count": profile.get("row_count", 0),
+    }
 
-    prompt = CATEGORIES_PROMPT.format(
-        filename=os.path.basename(state["file_path"]),
-        headers=", ".join(headers[:30]),
-        samples=json.dumps(samples, indent=2),
-        feedback=feedback or "(none — first attempt)",
+    from agents import resolve_category_paths
+    resolve_category_paths(cat_state)
+
+    paths = cat_state.get("category_hierarchy", [])
+    explanation = cat_state.get("category_reasoning", "")
+    needs_input = cat_state.get("need_user_input", False)
+
+    # Build suggestions in the format the frontend expects
+    suggestions = [
+        {
+            "type": "item",
+            "label": p,
+            "confidence": 95,
+            "reasoning": "Part of the product category hierarchy",
+        }
+        for p in paths
+    ]
+
+    if not explanation:
+        if paths:
+            explanation = (
+                f"I discovered **{len(paths)}** category paths from your data. "
+                f"The hierarchy was built by analysing columns that form parent→child relationships."
+            )
+        else:
+            explanation = (
+                "I wasn't able to automatically detect a clear category hierarchy. "
+                "Could you describe how your products are categorised? "
+                "For example: *'We sell Footwear > Shoes > Sneakers'*"
+            )
+
+    reasoning = (
+        f"Strategy used: declarative recipe execution on {len(paths)} paths. "
+        f"Empty levels collapsed, near-duplicates merged."
     )
-
-    result = _llm_json(prompt)
-    explanation = result.get("explanation", "")
-    reasoning = result.get("reasoning", "")
-    suggestions = result.get("suggestions", [])
 
     state["categories"] = PhaseOutput(
         explanation=explanation,
@@ -258,20 +258,25 @@ def categories_phase(state: InteractiveIngestionState) -> dict:
         user_feedback=feedback,
     )
 
-    # Also store category paths for downstream render
-    paths = [s.get("label", "") for s in suggestions if s.get("type") == "item"]
     state["profile_data"]["category_hierarchy"] = paths
     state["profile_data"]["category_candidates"] = suggestions
 
-    msg = (
-        f"📂 **Category Discovery**\n\n{explanation}\n\n"
-        f"I found **{len(paths)}** category paths. Do these look right?\n\n"
-        f"If something's off, just tell me — e.g. *\"Remove the 'Temporary' path\"* "
-        f"or *\"These categories don't match my hierarchy\"*."
-    )
+    if needs_input:
+        msg = (
+            f"📂 **Category Discovery**\n\n{explanation}\n\n"
+            f"Could you tell me what categories you use? "
+            f"Type something like: *'We sell Mens > Shoes and Womens > Dresses'*"
+        )
+    else:
+        msg = (
+            f"📂 **Category Discovery**\n\n{explanation}\n\n"
+            f"I found **{len(paths)}** category paths. Do these look right?\n\n"
+            f"If something's off, just tell me — e.g. *\"Remove that path\"* "
+            f"or *\"These don't match my hierarchy\"*."
+        )
     state.setdefault("messages", []).append({"role": "assistant", "content": msg})
 
-    logger.info(f"categories | paths={len(paths)}")
+    logger.info(f"categories | paths={len(paths)} | need_input={needs_input}")
     return state
 
 
