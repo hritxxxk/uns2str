@@ -25,30 +25,43 @@ def save_cached_mapping(fp, data):
 
 
 def read_file(path, sheet_name=None):
-    # CSV is plain text — read with csv module directly
+    """Lazy generator yielding one row at a time. Use take_rows() for partial reads.
+
+    xlsx uses openpyxl read_only (streams from disk, low memory).
+    csv uses csv.reader (lazy by nature).
+    xls (xlrd) loads fully — legacy format limitation.
+    """
+    import itertools
     ext = os.path.splitext(path)[1].lower()
     if ext == ".csv":
         with open(path, encoding="utf-8-sig") as f:
-            reader = csv.reader(f)
-            rows = [row for row in reader]
-        return rows
+            yield from csv.reader(f)
+        return
+    if ext in (".xlsx", ".xls"):
+        try:
+            wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+            ws = wb[sheet_name] if sheet_name else wb.active
+            try:
+                for row in ws.iter_rows(values_only=True):
+                    yield list(row)
+            finally:
+                wb.close()
+            return
+        except Exception:
+            pass
+        import xlrd
+        wb = xlrd.open_workbook(path)
+        ws = wb.sheet_by_name(sheet_name) if sheet_name else wb.sheet_by_index(0)
+        for r in range(ws.nrows):
+            yield [ws.cell_value(r, c) for c in range(ws.ncols)]
+        return
+    raise ValueError(f"Unsupported file extension: {ext}")
 
-    # Modern .xlsx is a zip file — openpyxl handles it
-    try:
-        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
-        ws = wb[sheet_name] if sheet_name else wb.active
-        rows = [list(row) for row in ws.iter_rows(values_only=True)]
-        wb.close()
-        return rows
-    except Exception:
-        pass
 
-    # Old .xls is an OLE container — xlrd handles it
-    import xlrd
-    wb = xlrd.open_workbook(path)
-    ws = wb.sheet_by_name(sheet_name) if sheet_name else wb.sheet_by_index(0)
-    rows = [[ws.cell_value(r, c) for c in range(ws.ncols)] for r in range(ws.nrows)]
-    return rows
+def take_rows(rows, n):
+    """Return first n rows from a generator as a list. Stops early if exhausted."""
+    import itertools
+    return list(itertools.islice(rows, n))
 
 
 def get_headers_and_data(rows, header_row=0):
@@ -101,6 +114,71 @@ def build_product_rows(headers, data, mapping, image_cols, core_cols=None):
 
         rows.append(record)
     return rows
+
+
+BLANK_TEMPLATES_DIR = "blank-templates"
+
+
+def download_blank_template(auth_header: str, template_type="category", lang_code="en", timezone="Asia/Calcutta"):
+    import urllib.request
+    configs = {
+        "category": {
+            "api_url": "https://uat-api.vinpim.com/api/pie/v1/download/download-template",
+            "module": "master",
+            "submodule": "product-master",
+            "category_id": [None],
+            "route": "https://uat.vinpim.com/pim/master/product-master?is_enabled=true",
+            "filename": "Category_template.xlsx",
+        },
+        "attribute": {
+            "api_url": "https://uat-api.vinpim.com/api/pie/v1/download/download-template",
+            "module": "attribute",
+            "submodule": "product-attribute",
+            "category_id": [],
+            "route": "https://uat.vinpim.com/pim/attribute/product-attribute?is_enabled=true",
+            "filename": "Attribute_template.xlsx",
+        },
+        "product": {
+            "api_url": "https://uat-api.vinpim.com/api/pdatg/v1/product/generate-master-template",
+            "module": "",
+            "submodule": "",
+            "category_id": [],
+            "route": "",
+            "filename": "Product_template.xlsx",
+        },
+    }
+    cfg = configs.get(template_type, configs["category"])
+    os.makedirs(BLANK_TEMPLATES_DIR, exist_ok=True)
+    if template_type == "product":
+        body = json.dumps({}).encode()
+    else:
+        body = json.dumps({
+            "lang_code": lang_code,
+            "timezone": timezone,
+            "product": "pim",
+            "module": cfg["module"],
+            "submodule": cfg["submodule"],
+            "reference_master_id": "",
+            "category_id": cfg["category_id"],
+            "route": cfg["route"],
+        }).encode()
+    req = urllib.request.Request(
+        cfg["api_url"],
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": auth_header,
+            "Origin": "https://uat.vinpim.com",
+            "Referer": "https://uat.vinpim.com/",
+        },
+    )
+    resp = json.loads(urllib.request.urlopen(req).read())
+    urls = resp.get("data", {}).get("url", [])
+    url = urls[0] if isinstance(urls, list) and urls else urls
+    url = url.replace("\\u0026", "&")
+    local_path = os.path.join(BLANK_TEMPLATES_DIR, cfg["filename"])
+    urllib.request.urlretrieve(url, local_path)
+    return local_path
 
 
 def extract_image_columns(headers, mapping=None):

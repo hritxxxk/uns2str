@@ -4,7 +4,7 @@ import openpyxl
 from dotenv import load_dotenv
 from google import genai
 from helpers import *
-from state import MappingResponse, ColumnMapping, CategoryValidation
+from state import ColumnMapping
 from tools.profiling import detect_data_sheet, profile_columns, detect_category_structure
 from tools.mapping import normalize_mapping, validate_mapping, build_attribute_definitions
 from tools.references import extract_reference_values
@@ -282,7 +282,7 @@ def _strategy_level_columns(state):
     headers = state.get("headers", [])
     sample = state.get("sample_rows", [{}])[0] if state.get("sample_rows") else {}
     from tools.profiling import profile_columns
-    rows = read_file(state["source_path"], state.get("sheet_name"))
+    rows = list(read_file(state["source_path"], state.get("sheet_name")))
     headers2, data2 = get_headers_and_data(rows, state.get("header_row", 0))
     dr = state.get("data_start_row", state.get("header_row", 0) + 1)
     if dr < state.get("header_row", 0) + 1:
@@ -302,7 +302,7 @@ Columns with unique counts and samples:
     indices = [headers.index(c) for c in chosen if c in headers]
     if len(indices) < 2:
         return None
-    rows = read_file(state["source_path"], state.get("sheet_name"))
+    rows = list(read_file(state["source_path"], state.get("sheet_name")))
     _, data = get_headers_and_data(rows, state.get("header_row", 0))
     dr = state.get("data_start_row", state.get("header_row", 0) + 1)
     if dr < state.get("header_row", 0) + 1:
@@ -316,7 +316,7 @@ def _strategy_single_column(state):
     cat_col = next((i for i, h in enumerate(headers) if h.lower() in ("category", "categories", "product type")), None)
     if cat_col is None:
         return None
-    rows = read_file(state["source_path"], state.get("sheet_name"))
+    rows = list(read_file(state["source_path"], state.get("sheet_name")))
     _, data = get_headers_and_data(rows, state.get("header_row", 0))
     dr = state.get("data_start_row", state.get("header_row", 0) + 1)
     if dr < state.get("header_row", 0) + 1:
@@ -353,7 +353,6 @@ Return JSON: {{"multi_value_separator": str or null, "path_separator": str, "spl
             if len(parts) >= 2:
                 paths.add(" > ".join(parts))
     return paths if len(paths) >= 2 else None
-    return paths if len(paths) >= 2 else None
 
 
 def _strategy_infer_from_attributes(state):
@@ -382,7 +381,7 @@ Columns:
     indices = [headers.index(c) for c in chosen if c in headers]
     if len(indices) < 2:
         return None
-    rows = read_file(state["source_path"], state.get("sheet_name"))
+    rows = list(read_file(state["source_path"], state.get("sheet_name")))
     _, data = get_headers_and_data(rows, state.get("header_row", 0))
     dr = state.get("data_start_row", state.get("header_row", 0) + 1)
     if dr < state.get("header_row", 0) + 1:

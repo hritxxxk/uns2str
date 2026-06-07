@@ -10,7 +10,7 @@ handler = logging.StreamHandler()
 handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", "%H:%M:%S"))
 logger.addHandler(handler)
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -488,10 +488,11 @@ def _agent_state_for_triage():
 
 
 @app.post("/vingpt/start")
-async def vingpt_start(req: StartRequest):
+async def vingpt_start(req: StartRequest, request: Request):
     if not os.path.exists(req.file_path):
         raise HTTPException(status_code=404, detail=f"File not found: {req.file_path}")
 
+    auth_header = request.headers.get("authorization", "")
     thread_id = str(uuid.uuid4())
 
     async def event_stream():
@@ -504,6 +505,18 @@ async def vingpt_start(req: StartRequest):
         ts["source_path"] = req.file_path
         ts["sheet_name"] = req.sheet_name
         ts = triage_source(ts)
+
+        sample_rows = []
+        try:
+            from helpers import read_file, take_rows
+            gen = read_file(req.file_path, ts.get("sheet_name"))
+            skip = ts.get("data_start_row", 1)
+            for _ in range(skip):
+                try: next(gen)
+                except StopIteration: break
+            sample_rows = take_rows(gen, 5)
+        except Exception:
+            pass
 
         sheet = ts.get("sheet_name") or "auto-detected"
         cols = ts.get("column_count", 0)
@@ -518,7 +531,7 @@ async def vingpt_start(req: StartRequest):
             "sheet_name": ts.get("sheet_name"),
             "profile_data": {
                 "headers": ts.get("headers", []),
-                "sample_rows": ts.get("sample_rows", []),
+                "sample_rows": sample_rows,
                 "row_count": ts.get("row_count", 0),
                 "column_count": ts.get("column_count", 0),
                 "profiles": ts.get("profiles", []),
@@ -528,6 +541,7 @@ async def vingpt_start(req: StartRequest):
             "mapping_confidence": {},
             "pending_questions": [],
             "generated_files": [],
+            "jwt_token": auth_header,
         }
 
         for event in vingpt_graph.stream(vingpt_initial, config):

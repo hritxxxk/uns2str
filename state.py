@@ -78,8 +78,9 @@ class IngestionState(TypedDict):
     core_mappings: dict[str, str]
     custom_mappings: dict[str, str]
     mapping_confidence: dict[str, int]
-    pending_questions: list[str]
+    pending_questions: list
     generated_files: list[str]
+    jwt_token: str
 
 
 class AgentState(MessagesState):

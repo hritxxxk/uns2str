@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
 from state import AgentState, IngestionOutput, ColumnMapping, MappingLLMResponse, PIM_DEFAULTS
-from helpers import read_file, get_headers_and_data, build_product_rows, extract_image_columns, fingerprint_headers, load_cached_mapping, save_cached_mapping
+from helpers import read_file, take_rows, get_headers_and_data, build_product_rows, extract_image_columns, fingerprint_headers, load_cached_mapping, save_cached_mapping, download_blank_template
 from learning import fetch_similar_examples
 from tools.mapping import build_attribute_definitions
 from tools.references import extract_reference_values
@@ -29,46 +29,40 @@ def triage_source(state: dict) -> dict:
     sheets = []
     sheet_count = 0
     best_sheet = state.get("sheet_name") or ""
-    best_size = 0
+    first_rows = []
+    total_row_count = 0
 
     if ext == ".csv":
-        # CSV has no sheets — treat as single unnamed dataset
         sheet_count = 1
         best_sheet = best_sheet or ""
-        with open(path, encoding="utf-8-sig") as f:
-            reader = csv.reader(f)
-            rows = [row for row in reader]
-        if not best_sheet:
-            best_sheet = ""
+        gen = read_file(path)
+        first_rows = take_rows(gen, 20)
+        total_row_count = 1 + sum(1 for _ in gen)
     elif ext in (".xlsx", ".xls"):
         try:
             wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
             sheets = wb.sheetnames
             sheet_count = len(sheets)
             if best_sheet and best_sheet in sheets:
-                best_sheet = best_sheet
                 ws = wb[best_sheet]
-                first = next(ws.iter_rows(max_row=1, values_only=True), [])
-                best_size = sum(1 for c in first if c is not None) * sum(1 for _ in ws.iter_rows())
             else:
+                best_sheet = sheets[0]
+                best_size = 0
                 for sn in sheets:
                     ws = wb[sn]
                     first = next(ws.iter_rows(max_row=1, values_only=True), [])
                     cols = sum(1 for c in first if c is not None)
-                    rows_est = sum(1 for _ in ws.iter_rows())
-                    size = cols * rows_est
+                    row_est = ws.max_row or 0
+                    size = cols * row_est
                     if size > best_size:
                         best_size = size
                         best_sheet = sn
+                        ws = wb[best_sheet]
+            total_row_count = ws.max_row or 0
             wb.close()
-
-            # Re-read the best sheet for header extraction
-            wb2 = openpyxl.load_workbook(path, read_only=True, data_only=True)
-            ws = wb2[best_sheet]
-            all_rows = [list(row) for row in ws.iter_rows(values_only=True)]
-            wb2.close()
+            gen = read_file(path, best_sheet)
+            first_rows = take_rows(gen, 20)
         except Exception:
-            # Fallback to xlrd for old .xls
             import xlrd
             xl = xlrd.open_workbook(path)
             sheets = xl.sheet_names()
@@ -79,23 +73,25 @@ def triage_source(state: dict) -> dict:
                 idx = 0
                 best_sheet = sheets[0]
             ws = xl.sheet_by_index(idx)
-            all_rows = [[ws.cell_value(r, c) for c in range(ws.ncols)] for r in range(ws.nrows)]
+            total_row_count = ws.nrows
+            gen = read_file(path, best_sheet)
+            first_rows = take_rows(gen, 20)
     else:
-        # Unknown extension — try read_file helper
-        all_rows = read_file(path, best_sheet or None)
+        gen = read_file(path, best_sheet or None)
+        first_rows = take_rows(gen, 20)
         sheet_count = 1
+        total_row_count = 1 + sum(1 for _ in gen)
 
-    # Extract headers: first non-empty row
     header_row = 0
-    for i, row in enumerate(all_rows):
+    for i, row in enumerate(first_rows):
         cleaned = [str(c).strip() for c in row if c is not None and str(c).strip()]
         if cleaned:
             header_row = i
             break
 
-    headers = [str(c) if c is not None else "" for c in all_rows[header_row]]
+    headers = [str(c) if c is not None else "" for c in first_rows[header_row]]
     data_start_row = header_row + 1
-    row_count = len(all_rows) - data_start_row
+    row_count = total_row_count - data_start_row
     if row_count < 0:
         row_count = 0
 
@@ -103,7 +99,6 @@ def triage_source(state: dict) -> dict:
     fingerprint = fingerprint_headers(headers)
     cached = load_cached_mapping(fingerprint)
 
-    # Build a basic profiles stub (no value scanning) — just column index and name
     basic_profiles = [
         {"name": h, "col_index": i}
         for i, h in enumerate(headers) if h.strip()
@@ -152,9 +147,15 @@ def map_columns_specialist(state: dict) -> dict:
     data_start = state.get("data_start_row", header_row + 1)
     headers = state.get("headers", [])
 
-    data_rows = rows[data_start:]
+    for _ in range(data_start):
+        try:
+            next(rows)
+        except StopIteration:
+            break
+
+    sample_rows_data = take_rows(rows, 5)
     sample_rows = []
-    for row in data_rows[:5]:
+    for row in sample_rows_data:
         sample = {}
         for i, h in enumerate(headers):
             if i < len(row) and row[i] is not None and str(row[i]).strip():
@@ -167,7 +168,7 @@ def map_columns_specialist(state: dict) -> dict:
     seen_targets = set()
     for h in headers[:10]:
         vals = []
-        for row in data_rows[:5]:
+        for row in sample_rows_data:
             idx = headers.index(h)
             if idx < len(row) and row[idx] is not None and str(row[idx]).strip():
                 vals.append(str(row[idx]).strip()[:40])
@@ -309,7 +310,13 @@ def evaluate_mappings(state: dict) -> dict:
     header_row = state.get("header_row", 0)
     data_start = state.get("data_start_row", header_row + 1)
     headers = state.get("headers", [])
-    data_rows = rows[data_start:]
+
+    for _ in range(data_start):
+        try:
+            next(rows)
+        except StopIteration:
+            break
+    sample_rows_data = take_rows(rows, 10)
 
     mapping = state.get("mapping", [])
     core_cols = state.get("core_column_detection", {})
@@ -330,7 +337,7 @@ def evaluate_mappings(state: dict) -> dict:
 
         col_idx = headers.index(src)
         samples = []
-        for row in data_rows[:10]:
+        for row in sample_rows_data:
             if col_idx < len(row) and row[col_idx] is not None and str(row[col_idx]).strip():
                 samples.append(str(row[col_idx]).strip())
         if not samples:
@@ -416,7 +423,12 @@ def render_agent(state: dict) -> dict:
     rows = read_file(state["source_path"], state.get("sheet_name"))
     hr = state.get("header_row", 0)
     dr = max(state.get("data_start_row", hr + 1), hr + 1)
-    data = rows[dr:]
+    for _ in range(dr):
+        try:
+            next(rows)
+        except StopIteration:
+            break
+    data = rows
     row_mappings = [{"source_column": m.source_column, "target_attribute": m.target_attribute} for m in mapping]
     img_cols = extract_image_columns(headers, row_mappings)
     attr_names = [m.get("target_attribute", m.get("source_column")) for m in row_mappings]
@@ -536,12 +548,20 @@ def _render_vingpt(state: dict) -> dict:
     rows = read_file(state["file_path"], state.get("sheet_name"))
     hr = state.get("profile_data", {}).get("header_row", 0)
     dr = hr + 1
-    data = rows[dr:]
+    for _ in range(dr):
+        try:
+            next(rows)
+        except StopIteration:
+            break
+    data = rows
     img_cols = extract_image_columns(headers)
     row_mappings = [{"source_column": m.source_column, "target_attribute": m.target_attribute} for m in mapping_objs]
     attr_names = [m.target_attribute for m in mapping_objs]
     product_rows = build_product_rows(headers, data, row_mappings, img_cols, state.get("core_mappings"))
 
+    jwt = state.get("jwt_token", "")
+    blank_cat = download_blank_template(jwt, "category") if jwt else ""
+    blank_attr = download_blank_template(jwt, "attribute") if jwt else ""
     files = render_all_templates.invoke({
         "fingerprint": fp,
         "category_hierarchy": cats,
@@ -550,6 +570,8 @@ def _render_vingpt(state: dict) -> dict:
         "headers": headers,
         "product_rows": product_rows,
         "attr_names": attr_names,
+        "blank_category_path": blank_cat,
+        "blank_attribute_path": blank_attr,
     })
 
     state["generated_files"] = list(files.values())
