@@ -15,8 +15,7 @@ client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 PIM_DEFAULTS = ["sku_name", "code"]
 
-if False:
-    MAPPING_PROMPT_TEMPLATE = """You are a PIM data mapping expert. Map each source column to a PIM attribute.
+MAPPING_PROMPT_TEMPLATE = """You are a PIM data mapping expert. Map each source column to a PIM attribute.
 
 Return a JSON object with key "mappings" containing an array of objects.
 Each object has these fields:
@@ -124,6 +123,7 @@ def avg_confidence(mappings):
 # ─── Graph nodes (thin orchestrators) ────────────────────────────
 
 def fingerprint_source(state):
+    
     rows = read_file(state["source_path"], state.get("sheet_name"))
     headers, _ = get_headers_and_data(rows)
     fp = fingerprint_headers(headers)
@@ -258,7 +258,7 @@ Candidates:
         contents=prompt,
         config={"response_mime_type": "application/json"}
     )
-    r = json.loads(resp.text)
+    r = _safe_json_parse(resp.text)
     if isinstance(r, list):
         r = r[0] if r else {}
     sheet_name = r.get("sheet", "")
@@ -295,7 +295,7 @@ Return JSON: {{"columns": ["col1", "col2", ...]}}
 Columns with unique counts and samples:
 {json.dumps(col_info, indent=2)}"""
     resp = client.models.generate_content(model="gemini-2.5-flash-lite", contents=prompt, config={"response_mime_type": "application/json"})
-    r = json.loads(resp.text)
+    r = _safe_json_parse(resp.text)
     if isinstance(r, list):
         r = r[0] if r else {}
     chosen = r.get("columns", [])
@@ -328,7 +328,7 @@ def _strategy_single_column(state):
 Determine: multi_value_separator (if one cell has multiple categories), path_separator (between levels), split_cells (true/false).
 Return JSON: {{"multi_value_separator": str or null, "path_separator": str, "split_cells": bool}}"""
     resp = client.models.generate_content(model="gemini-2.5-flash-lite", contents=prompt, config={"response_mime_type": "application/json"})
-    r = json.loads(resp.text)
+    r = _safe_json_parse(resp.text)
     if isinstance(r, list):
         r = r[0] if r else {}
     multi_sep = r.get("multi_value_separator")
@@ -467,4 +467,142 @@ def fill_templates(state):
     files["product"] = f"output/{fp}_product.xlsx"
 
     state["output_files"] = files
+    return state
+
+
+# ─── VinGPT Nodes ─────────────────────────────────────────────
+import json
+import os
+
+from state import PIM_DEFAULTS
+
+
+ANALYZE_PROMPT = """You are a friendly data analyst helping a non-technical user prepare their spreadsheet for a PIM system.
+
+Given the file info and sample data below, identify:
+1. Which columns match the standard fields: {standard_fields}
+2. Which columns are custom/dynamic attributes the user wants to keep
+3. Any missing standard fields that have no matching column
+
+Return JSON:
+{{
+  "core": [{{"column": "src name", "target": "sku", "confidence": 95}}],
+  "custom_columns": ["Col1", "Col2"],
+  "missing_core": []
+}}
+Confidence: 0-100 rating. Below 85 means uncertain and needs user confirmation.
+
+File: {filename}
+Columns found: {columns}
+Sample data:
+{samples}
+"""
+
+
+def analyze_and_ask(state: dict) -> dict:
+    profile = state.get("profile_data")
+    if not profile:
+        state["pending_questions"] = ["No profile data found. Please provide a valid file."]
+        return state
+
+    headers = profile.get("headers", [])
+    samples = profile.get("sample_rows", [])
+    row_count = profile.get("row_count", 0)
+
+    prompt = ANALYZE_PROMPT.format(
+        standard_fields=", ".join(PIM_DEFAULTS),
+        filename=os.path.basename(state.get("file_path", "")),
+        columns=", ".join(headers),
+        samples=json.dumps(samples[:3], indent=2) if samples else "No sample rows",
+    )
+
+    from google import genai as _genai
+    client = _genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+    resp = client.models.generate_content(
+        model="gemini-2.5-flash-lite",
+        contents=prompt,
+        config={"response_mime_type": "application/json"},
+    )
+
+    try:
+        result = json.loads(resp.text)
+    except json.JSONDecodeError:
+        import re as _re
+        m = _re.search(r'\{.*\}', resp.text, _re.DOTALL)
+        result = json.loads(m.group()) if m else {}
+
+    core_list = result.get("core", []) if isinstance(result.get("core"), list) else []
+    custom_cols = result.get("custom_columns", [])
+    missing = result.get("missing_core", [])
+
+    state["core_mappings"] = {item["target"]: item["column"] for item in core_list if item.get("column")}
+    state["mapping_confidence"] = {item["target"]: item["confidence"] for item in core_list if item.get("column")}
+    state["custom_mappings"] = {col: col for col in custom_cols}
+
+    questions = []
+    for item in core_list:
+        if item.get("column"):
+            questions.append({
+                "id": f"core_{item['target']}",
+                "type": "core",
+                "target": item["target"],
+                "column": item["column"],
+                "confidence": item.get("confidence", 100),
+                "text": f"I found '{item['column']}' — looks like it could be the **{item['target']}** field. Is that right? (Yes/No)",
+            })
+    for pim_key in missing:
+        questions.append({
+            "id": f"missing_{pim_key}",
+            "type": "missing",
+            "target": pim_key,
+            "column": "",
+            "confidence": 0,
+            "text": f"I couldn't find a column that looks like **{pim_key}**. Do you want to leave it blank for now? (Yes/No)",
+        })
+    if custom_cols:
+        col_list = "**, **".join(custom_cols[:5])
+        suffix = f" and {len(custom_cols) - 5} more" if len(custom_cols) > 5 else ""
+        questions.append({
+            "id": "custom_attrs",
+            "type": "custom",
+            "target": "",
+            "column": "",
+            "confidence": 100,
+            "columns": custom_cols,
+            "text": f"I also see **{col_list}**{suffix} — these look like custom attributes specific to your products. Should I keep them as-is? (Yes/No)",
+        })
+
+    state["pending_questions"] = questions
+
+    msg = (
+        f"Great, I've scanned **{os.path.basename(state.get('file_path', ''))}** "
+        f"({row_count} rows, {len(headers)} columns). "
+        f"I have {len(questions)} questions before I proceed."
+    )
+    state.setdefault("messages", []).append({"role": "assistant", "content": msg})
+
+    return state
+
+
+def check_confidence(state: dict) -> dict:
+    conf = state.get("mapping_confidence", {})
+    questions = state.setdefault("pending_questions", [])
+
+    low_conf_items = [(tgt, col, score) for tgt, col in state.get("core_mappings", {}).items()
+                      if (score := conf.get(tgt, 100)) < 85]
+
+    for target, column, score in low_conf_items:
+        questions.append({
+            "id": f"conf_{target}",
+            "type": "core",
+            "target": target,
+            "column": column,
+            "confidence": score,
+            "text": f"I'm not very sure about **{column}** → **{target}** (confidence: {score}%). Can you confirm this is correct? (Yes/No)",
+        })
+
+    if low_conf_items:
+        msg = f"I have {len(low_conf_items)} more quick question{'s' if len(low_conf_items) > 1 else ''} about mappings I'm unsure about."
+        state.setdefault("messages", []).append({"role": "assistant", "content": msg})
+
     return state

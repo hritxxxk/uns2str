@@ -86,6 +86,8 @@ def build_product_rows(headers, data, mapping, image_cols, core_cols=None):
         for m in mapping:
             src = m.get("source_column")
             tgt = m.get("target_attribute", src)
+            if tgt in ("code", "sku_name", "mrp", "category_path"):
+                continue
             if src and src in headers:
                 idx = headers.index(src)
                 if idx < len(row):

@@ -1,4 +1,4 @@
-from typing import Annotated, Optional
+from typing import Annotated, Optional, TypedDict
 
 from langgraph.channels.delta import DeltaChannel
 from langgraph.graph import MessagesState
@@ -68,6 +68,18 @@ class IngestionOutput(BaseModel):
     profiles: list[dict] = Field(default=[], description="Column profiles")
     category_hierarchy: list[str] = Field(default=[], description="Category paths")
     sheet_name: str = Field(default="", description="Sheet name used")
+
+
+class IngestionState(TypedDict):
+    messages: list
+    file_path: str
+    sheet_name: str | None
+    profile_data: dict | None
+    core_mappings: dict[str, str]
+    custom_mappings: dict[str, str]
+    mapping_confidence: dict[str, int]
+    pending_questions: list[str]
+    generated_files: list[str]
 
 
 class AgentState(MessagesState):

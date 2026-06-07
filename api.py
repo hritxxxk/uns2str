@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import uuid
@@ -10,9 +11,11 @@ handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"
 logger.addHandler(handler)
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from graph import graph
+from graph import graph, vingpt_graph
+from helpers import read_file
 from learning import log_corrections
 from state import ColumnMapping
 
@@ -44,6 +47,11 @@ class ApproveRequest(BaseModel):
 
 class StatusRequest(BaseModel):
     thread_id: str = Field(description="Thread ID to query")
+
+
+class ChatRequest(BaseModel):
+    thread_id: str = Field(description="Thread ID from /vingpt/start")
+    answers: dict[str, bool] = Field(description="Mapping of question keys to yes/no answers")
 
 
 class StatusResponse(BaseModel):
@@ -89,6 +97,26 @@ app = FastAPI(
     description="Human-in-the-loop approval workflow for PIM data ingestion",
     version="1.0.0",
 )
+
+
+@app.on_event("startup")
+async def check_tracing():
+    ls_key = os.getenv("LANGSMITH_API_KEY")
+    ls_tracing = os.getenv("LANGSMITH_TRACING") or os.getenv("LANGCHAIN_TRACING_V2")
+    ls_project = os.getenv("LANGSMITH_PROJECT") or "pim-ingestion"
+    pg_uri = os.getenv("POSTGRES_URI")
+
+    if ls_key and ls_tracing:
+        logger.info(f"LangSmith tracing enabled | project={ls_project}")
+    elif ls_key and not ls_tracing:
+        logger.info("LangSmith API key set but tracing disabled (set LANGSMITH_TRACING=true)")
+    else:
+        logger.info("LangSmith not configured — set LANGSMITH_API_KEY + LANGSMITH_TRACING=true for tracing")
+
+    if pg_uri:
+        logger.info(f"Postgres checkpointer configured | uri={pg_uri.split('@')[-1] if '@' in pg_uri else 'local'}")
+    else:
+        logger.info("Postgres not configured — using MemorySaver (data lost on restart)")
 
 
 def _build_initial_state(file_path: str, sheet_name: Optional[str] = None) -> dict:
@@ -338,6 +366,193 @@ def ingest_status(req: StatusRequest):
         output_files=files,
         summary=vals.get("validation_message") or "Run completed without success output",
     )
+
+
+@app.post("/ingest/chat")
+async def ingest_chat(req: ChatRequest):
+    config = {"configurable": {"thread_id": req.thread_id}}
+
+    try:
+        current = vingpt_graph.get_state(config)
+    except Exception:
+        raise HTTPException(status_code=404, detail=f"Thread '{req.thread_id}' not found")
+
+    questions = current.values.get("pending_questions", [])
+    if not questions:
+        raise HTTPException(status_code=400, detail="No pending questions for this thread")
+
+    core = dict(current.values.get("core_mappings", {}))
+    custom = dict(current.values.get("custom_mappings", {}))
+
+    from google import genai as _genai
+    gclient = _genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+
+    resolved_ids = set()
+    for q in questions[:len(req.answers)]:
+        user_text = list(req.answers.values())[questions.index(q)] if isinstance(req.answers, dict) else ""
+        if isinstance(req.answers, list):
+            idx = questions.index(q)
+            user_text = req.answers[idx] if idx < len(req.answers) else ""
+
+        intent_prompt = f"""Given this question and user response, determine intent.
+
+Question: {q.get("text", "")}
+User response: {user_text}
+
+Return JSON: {{"intent": "approve" | "reject" | "alternative", "alternative_value": "user's suggested name or empty"}}"""
+        resp = gclient.models.generate_content(
+            model="gemini-2.5-flash-lite", contents=intent_prompt,
+            config={"response_mime_type": "application/json"},
+        )
+        try:
+            intent = json.loads(resp.text)
+        except json.JSONDecodeError:
+            intent = {"intent": "approve"}
+
+        intent_type = intent.get("intent", "approve")
+        q_type = q.get("type", "")
+        q_target = q.get("target", "")
+        q_column = q.get("column", "")
+
+        if intent_type == "reject":
+            if q_type == "core" and q_target in core:
+                del core[q_target]
+            elif q_type == "custom" and q.get("columns"):
+                for c in q.get("columns", []):
+                    custom.pop(c, None)
+        elif intent_type == "alternative":
+            alt = intent.get("alternative_value", "").strip()
+            if alt and q_type == "core" and q_target in core:
+                core[q_target] = alt
+            elif alt and q_type == "custom" and q_column:
+                custom[alt] = q_column
+                custom.pop(q_column, None)
+
+        resolved_ids.add(q["id"])
+
+    remaining = [q for q in questions if q.get("id") not in resolved_ids]
+    user_msg = f"User answered {len(resolved_ids)} questions."
+    new_messages = current.values.get("messages", []) + [{"role": "user", "content": user_msg}]
+
+    vingpt_graph.update_state(config, {
+        "messages": new_messages,
+        "core_mappings": core,
+        "custom_mappings": custom,
+        "pending_questions": remaining,
+    })
+
+    for _event in vingpt_graph.stream(None, config):
+        pass
+
+    state = vingpt_graph.get_state(config).values
+    new_questions = state.get("pending_questions", [])
+    core_final = state.get("core_mappings", {})
+    custom_final = state.get("custom_mappings", {})
+    files = state.get("generated_files", [])
+    msgs = state.get("messages", [])
+
+    if new_questions:
+        return {
+            "status": "pending",
+            "thread_id": req.thread_id,
+            "questions": new_questions,
+            "messages": [m for m in msgs[-4:] if isinstance(m, dict)],
+        }
+
+    return {
+        "status": "complete",
+        "thread_id": req.thread_id,
+        "core_mappings": core_final,
+        "custom_attributes": list(custom_final.keys()),
+        "generated_files": files,
+        "messages": [m for m in msgs[-4:] if isinstance(m, dict)],
+    }
+
+
+# ─── VinGPT SSE Endpoint ────────────────────────────────────────
+
+def _agent_state_for_triage():
+    return {
+        "messages": [], "source_path": "", "sheet_name": None,
+        "structured_response": None, "remaining_steps": 25,
+        "fingerprint": "", "is_known_schema": False, "headers": [],
+        "header_row": 0, "data_start_row": 1, "metadata": [], "profiles": [],
+        "sample_rows": [], "row_count": 0, "column_count": 0, "sheet_count": 0,
+        "sheets": [], "category_candidates": [], "category_path_config": {},
+        "category_hierarchy": [], "mapping": [], "mapping_requires_review": False,
+        "core_column_detection": {}, "attribute_definitions": [],
+        "reference_values": {}, "output_files": {}, "need_user_input": False,
+        "validation_errors": [], "validation_message": "", "correction_cycle": 0,
+        "error": None,
+    }
+
+
+@app.post("/vingpt/start")
+async def vingpt_start(req: StartRequest):
+    if not os.path.exists(req.file_path):
+        raise HTTPException(status_code=404, detail=f"File not found: {req.file_path}")
+
+    thread_id = str(uuid.uuid4())
+
+    async def event_stream():
+        config = {"configurable": {"thread_id": thread_id}}
+
+        yield f"data: {json.dumps({'type': 'progress', 'message': 'Opening file...'})}\n\n"
+
+        from graph import triage_source
+        ts = _agent_state_for_triage()
+        ts["source_path"] = req.file_path
+        ts["sheet_name"] = req.sheet_name
+        ts = triage_source(ts)
+
+        sheet = ts.get("sheet_name") or "auto-detected"
+        cols = ts.get("column_count", 0)
+        rows = ts.get("row_count", 0)
+        yield f"data: {json.dumps({'type': 'progress', 'message': f'Detected {cols} columns on sheet \"{sheet}\" ({rows} data rows)'})}\n\n"
+
+        yield f"data: {json.dumps({'type': 'progress', 'message': 'Analyzing column types and sample values...'})}\n\n"
+
+        vingpt_initial = {
+            "messages": [],
+            "file_path": req.file_path,
+            "sheet_name": ts.get("sheet_name"),
+            "profile_data": {
+                "headers": ts.get("headers", []),
+                "sample_rows": ts.get("sample_rows", []),
+                "row_count": ts.get("row_count", 0),
+                "column_count": ts.get("column_count", 0),
+                "profiles": ts.get("profiles", []),
+            },
+            "core_mappings": {},
+            "custom_mappings": {},
+            "mapping_confidence": {},
+            "pending_questions": [],
+            "generated_files": [],
+        }
+
+        for event in vingpt_graph.stream(vingpt_initial, config):
+            for node_name, node_data in event.items():
+                if node_name == "__interrupt__":
+                    break
+                if node_name == "analyze":
+                    yield f"data: {json.dumps({'type': 'progress', 'message': 'Mapped core fields and identified custom attributes...'})}\n\n"
+                elif node_name == "check_conf":
+                    yield f"data: {json.dumps({'type': 'progress', 'message': 'Checked mapping confidence...'})}\n\n"
+                elif node_name == "human_input":
+                    yield f"data: {json.dumps({'type': 'progress', 'message': 'Preparing questions for you...'})}\n\n"
+                elif node_name == "render":
+                    yield f"data: {json.dumps({'type': 'progress', 'message': 'All checks passed. Generating templates...'})}\n\n"
+
+        state = vingpt_graph.get_state(config).values
+        questions = state.get("pending_questions", [])
+        core = state.get("core_mappings", {})
+        custom = state.get("custom_mappings", {})
+
+        yield f"data: {json.dumps({'type': 'result', 'thread_id': thread_id, 'core_mappings': core, 'custom_attributes': list(custom.keys()), 'questions': questions})}\n\n"
+
+        logger.info(f"vingpt | thread={thread_id} | file={req.file_path} | core={len(core)} | custom={len(custom)} | questions={len(questions)}")
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 # ─── Run (for development) ──────────────────────────────────────

@@ -496,3 +496,85 @@ graph = builder.compile(
     checkpointer=checkpointer,
     interrupt_after=["evaluate"],
 )
+
+# ─── VinGPT Graph ───────────────────────────────────────────────
+
+from state import IngestionState
+from agents import analyze_and_ask, check_confidence
+
+vingpt_builder = StateGraph(IngestionState)
+
+def _route_questions(state: dict) -> str:
+    if state.get("pending_questions"):
+        return "human_input"
+    return "render"
+
+def _human_input_node(state: dict) -> dict:
+    return state
+
+def _render_vingpt(state: dict) -> dict:
+    from tools.mapping import build_attribute_definitions
+    from tools.references import extract_reference_values
+    from tools.rendering import render_all_templates
+
+    mapping_objs = []
+    for target, col in state.get("core_mappings", {}).items():
+        if col:
+            mapping_objs.append(ColumnMapping(source_column=col, target_attribute=target, confidence=1.0))
+    for col, preserved in state.get("custom_mappings", {}).items():
+        mapping_objs.append(ColumnMapping(source_column=col, target_attribute=preserved, confidence=1.0))
+
+    fp = fingerprint_headers(state.get("profile_data", {}).get("headers", []))
+    headers = state.get("profile_data", {}).get("headers", [])
+    cats = state.get("profile_data", {}).get("category_hierarchy", [])
+
+    attr_defs = build_attribute_definitions.invoke({"mappings": mapping_objs})
+    refs = extract_reference_values.invoke({
+        "mappings": [{"source_column": m.source_column, "target_attribute": m.target_attribute, "attribute_type": m.attribute_type} for m in mapping_objs],
+        "profiles": state.get("profile_data", {}).get("profiles", []),
+    })
+    rows = read_file(state["file_path"], state.get("sheet_name"))
+    hr = state.get("profile_data", {}).get("header_row", 0)
+    dr = hr + 1
+    data = rows[dr:]
+    img_cols = extract_image_columns(headers)
+    row_mappings = [{"source_column": m.source_column, "target_attribute": m.target_attribute} for m in mapping_objs]
+    attr_names = [m.target_attribute for m in mapping_objs]
+    product_rows = build_product_rows(headers, data, row_mappings, img_cols, state.get("core_mappings"))
+
+    files = render_all_templates.invoke({
+        "fingerprint": fp,
+        "category_hierarchy": cats,
+        "attribute_definitions": attr_defs,
+        "reference_values": refs,
+        "headers": headers,
+        "product_rows": product_rows,
+        "attr_names": attr_names,
+    })
+
+    state["generated_files"] = list(files.values())
+    msg = f"All done! Generated {len(files)} PIM template files."
+    state.setdefault("messages", []).append({"role": "assistant", "content": msg})
+    return state
+
+vingpt_builder.add_node("analyze", analyze_and_ask)
+vingpt_builder.add_node("check_conf", check_confidence)
+vingpt_builder.add_node("human_input", _human_input_node)
+vingpt_builder.add_node("render", _render_vingpt)
+
+vingpt_builder.add_edge(START, "analyze")
+vingpt_builder.add_edge("analyze", "check_conf")
+
+vingpt_builder.add_conditional_edges(
+    "check_conf",
+    _route_questions,
+    {"human_input": "human_input", "render": "render"},
+)
+
+vingpt_builder.add_edge("human_input", "check_conf")
+vingpt_builder.add_edge("render", END)
+
+vingpt_graph = vingpt_builder.compile(
+    checkpointer=checkpointer,
+    interrupt_after=["human_input"],
+)
