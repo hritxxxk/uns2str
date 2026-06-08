@@ -127,22 +127,65 @@ def merge_sources(recipe: dict, source_dir: str, output_path: str) -> str:
     return output_path
 
 
-def deduplicate_fuzzy(unified_path: str, threshold: float = 0.92) -> str:
-    """Post-process: fuzzy-deduplicate near-duplicate codes using character overlap.
+def _jaro_winkler(s1: str, s2: str) -> float:
+    """Jaro-Winkler string similarity."""
+    if not s1 or not s2:
+        return 0.0
+    s1, s2 = s1.upper(), s2.upper()
+    if s1 == s2:
+        return 1.0
+    match_distance = max(len(s1), len(s2)) // 2 - 1
+    match_distance = max(match_distance, 0)
+    s1_matches = [False] * len(s1)
+    s2_matches = [False] * len(s2)
+    matches = 0
+    transpositions = 0
+    for i in range(len(s1)):
+        start = max(0, i - match_distance)
+        end = min(i + match_distance + 1, len(s2))
+        for j in range(start, end):
+            if s2_matches[j] or s1[i] != s2[j]:
+                continue
+            s1_matches[i] = True
+            s2_matches[j] = True
+            matches += 1
+            break
+    if matches == 0:
+        return 0.0
+    k = 0
+    for i in range(len(s1)):
+        if not s1_matches[i]:
+            continue
+        while not s2_matches[k]:
+            k += 1
+        if s1[i] != s2[k]:
+            transpositions += 1
+        k += 1
+    jaro = (matches / len(s1) + matches / len(s2) + (matches - transpositions / 2) / matches) / 3
+    prefix = 0
+    for i in range(min(4, len(s1), len(s2))):
+        if s1[i] == s2[i]:
+            prefix += 1
+        else:
+            break
+    return jaro + prefix * 0.1 * (1 - jaro)
 
-    Reads the unified CSV, groups rows whose code field has a high character overlap,
-    keeps the first occurrence of each group, rewrites the file.
+
+def _row_quality(row: list[str], skip_indices: set = frozenset()) -> int:
+    """Count non-empty fields in a row as a measure of data quality."""
+    return sum(1 for i, val in enumerate(row) if val.strip() and i not in skip_indices)
+
+
+def deduplicate_fuzzy(unified_path: str, threshold: float = 0.92) -> str:
+    """Fuzzy-deduplicate near-duplicate codes using Jaro-Winkler similarity.
+
+    Near-duplicate pairs are merged into a single "Golden Record" row:
+    the row with the most non-empty fields is kept, combining fields
+    from both rows (duplicate row fills missing fields in the golden record).
+
     Returns the same path.
     """
     import tempfile, shutil
-
-    def overlap(a: str, b: str) -> float:
-        if not a or not b:
-            return 0.0
-        a = a.upper()
-        b = b.upper()
-        common = sum(1 for c in a if c in b)
-        return common / max(len(a), len(b))
 
     with open(unified_path, "r", newline="", encoding="utf-8") as f:
         reader = csv.reader(f)
@@ -150,22 +193,46 @@ def deduplicate_fuzzy(unified_path: str, threshold: float = 0.92) -> str:
         rows = list(reader)
 
     code_idx = headers.index("code") if "code" in headers else 0
+    code_idx = max(code_idx, 0)
     kept = []
-    seen_groups = []
+    groups = []  # list of {"code": str, "row": list, "quality": int}
 
     for row in rows:
         code = row[code_idx].strip().upper() if code_idx < len(row) else ""
         if not code:
             kept.append(row)
             continue
-        is_dup = False
-        for group_code in seen_groups:
-            if overlap(code, group_code) >= threshold:
-                is_dup = True
+
+        qty = _row_quality(row, {code_idx})
+        matched = None
+
+        for group in groups:
+            if _jaro_winkler(code, group["code"]) >= threshold:
+                matched = group
                 break
-        if not is_dup:
-            seen_groups.append(code)
-            kept.append(row)
+
+        if matched is None:
+            groups.append({"code": code, "row": row, "quality": qty})
+        elif qty > matched["quality"]:
+            # New row has better quality — merge into golden record
+            for i in range(len(row)):
+                if i == code_idx:
+                    continue
+                if row[i].strip() and (not matched["row"][i].strip() or i >= len(matched["row"])):
+                    if i < len(matched["row"]):
+                        matched["row"][i] = row[i]
+            matched["quality"] = _row_quality(matched["row"], {code_idx})
+        else:
+            # Existing golden record has better quality — fill missing fields
+            for i in range(len(matched["row"])):
+                if i == code_idx:
+                    continue
+                if not matched["row"][i].strip() and i < len(row) and row[i].strip():
+                    matched["row"][i] = row[i]
+            matched["quality"] = _row_quality(matched["row"], {code_idx})
+
+    deduped_count = len(rows) - len(groups) - (len(rows) - len([r for r in rows if not r[code_idx].strip()]))
+    kept = [g["row"] for g in groups] + [r for r in rows if not r[code_idx].strip()]
 
     if len(kept) < len(rows):
         tmp_path = unified_path + ".tmp"
@@ -174,6 +241,6 @@ def deduplicate_fuzzy(unified_path: str, threshold: float = 0.92) -> str:
             writer.writerow(headers)
             writer.writerows(kept)
         shutil.move(tmp_path, unified_path)
-        logger.info(f"fuzzy dedup: {len(rows)} -> {len(kept)} rows")
+        logger.info(f"fuzzy dedup: {len(rows)} -> {len(kept)} rows | jaro-winkler threshold={threshold}")
 
     return unified_path
