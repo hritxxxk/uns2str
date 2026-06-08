@@ -249,27 +249,96 @@ def triage_interactive(state: InteractiveIngestionState) -> dict:
 # This node delegates to it, then wraps the result in a PhaseOutput.
 
 
+def parse_category_feedback(feedback: str) -> dict:
+    prompt = f"""
+Analyze this user feedback for product category onboarding.
+Determine if they are explicitly asking to combine or build the category tree from specific columns.
+
+User feedback: "{feedback}"
+
+You must return a valid JSON object matching this schema:
+{{
+    "is_direct_override": bool,
+    "specified_columns": ["col1", "col2", ...],
+    "explanation": "string"
+}}
+
+JSON:
+"""
+    try:
+        return _llm_json(prompt)
+    except Exception:
+        return {"is_direct_override": False, "specified_columns": [], "explanation": ""}
+
+
+def build_paths_from_generator(file_path: str, sheet_name: str | None, columns: list[str]) -> list[str]:
+    gen = read_file(file_path, sheet_name)
+    try:
+        headers_row = next(gen)
+    except StopIteration:
+        return []
+    headers = [str(c).strip() for c in headers_row if c is not None]
+    col_indices = []
+    for col in columns:
+        col_clean = col.strip()
+        if col_clean in headers:
+            col_indices.append(headers.index(col_clean))
+    if not col_indices:
+        return []
+    paths = set()
+    for row in gen:
+        parts = []
+        for idx in col_indices:
+            if idx < len(row):
+                val = row[idx]
+                if val is not None and str(val).strip().lower() != "nan" and str(val).strip() != "":
+                    parts.append(str(val).strip())
+        if parts:
+            paths.add(" > ".join(parts))
+    return sorted(list(paths))
+
+
 def categories_phase(state: InteractiveIngestionState) -> dict:
-    """Resolve category taxonomy via declarative recipe strategy from agents.py.
+    file_path = state["file_path"]
+    sheet_name = state.get("sheet_name")
 
-    Uses the new _strategy_declarative_recipe (primary) which:
-    1. Profiles columns with unique counts
-    2. Asks LLM to write a declarative parsing recipe
-    3. Executes the recipe on 100% of rows (deterministic)
-    4. Self-heals near-duplicates
+    categories_state = state.get("categories", {})
+    feedback = categories_state.get("user_feedback", "").strip()
 
-    Falls back to the existing 4-strategy chain if the recipe approach
-    doesn't yield valid paths.
-    """
+    # ── Intent parsing bypass ────────────────────────────────
+    if feedback:
+        decision = parse_category_feedback(feedback)
+        if decision.get("is_direct_override") and decision.get("specified_columns"):
+            updated_paths = build_paths_from_generator(file_path, sheet_name, decision["specified_columns"])
+            if updated_paths:
+                explanation = (
+                    f"I processed your request: '{decision['explanation']}'. "
+                    f"Reconstructed taxonomy from columns: {', '.join(decision['specified_columns'])}."
+                )
+                suggestions = [
+                    {"type": "item", "label": p, "confidence": 100, "reasoning": "Built from your specified columns"}
+                    for p in updated_paths
+                ]
+                state["categories"] = PhaseOutput(
+                    explanation=explanation,
+                    reasoning=f"Programmatic extraction from columns: {decision['specified_columns']}",
+                    suggestions=suggestions,
+                    approved=True,
+                    user_feedback="",
+                )
+                state["profile_data"]["category_hierarchy"] = updated_paths
+                msg = f"📂 **Category Discovery**\n\n{explanation}\n\nFound **{len(updated_paths)}** paths."
+                state.setdefault("messages", []).append({"role": "assistant", "content": msg})
+                logger.info(f"categories | bypass | paths={len(updated_paths)} | cols={decision['specified_columns']}")
+                return state
+
+    # ── Standard extraction via agents.py ────────────────────
     profile = state.get("profile_data", {})
     headers = profile.get("headers", [])
-    feedback = state.get("categories", {}).get("user_feedback", "")
 
-    # Build a temporary state dict for agents.resolve_category_paths
-    # It expects: source_path, sheet_name, headers, header_row, data_start_row
     cat_state = {
-        "source_path": state["file_path"],
-        "sheet_name": state.get("sheet_name"),
+        "source_path": file_path,
+        "sheet_name": sheet_name,
         "headers": headers,
         "header_row": profile.get("header_row", 0),
         "data_start_row": profile.get("data_start_row", 1),
@@ -290,61 +359,31 @@ def categories_phase(state: InteractiveIngestionState) -> dict:
     explanation = cat_state.get("category_reasoning", "")
     needs_input = cat_state.get("need_user_input", False)
 
-    # Build suggestions in the format the frontend expects
     suggestions = [
-        {
-            "type": "item",
-            "label": p,
-            "confidence": 95,
-            "reasoning": "Part of the product category hierarchy",
-        }
+        {"type": "item", "label": p, "confidence": 95, "reasoning": "Part of the product category hierarchy"}
         for p in paths
     ]
 
     if not explanation:
         if paths:
-            explanation = (
-                f"I discovered **{len(paths)}** category paths from your data. "
-                f"The hierarchy was built by analysing columns that form parent→child relationships."
-            )
+            explanation = f"I discovered **{len(paths)}** category paths from your data."
         else:
-            explanation = (
-                "I wasn't able to automatically detect a clear category hierarchy. "
-                "Could you describe how your products are categorised? "
-                "For example: *'We sell Footwear > Shoes > Sneakers'*"
-            )
-
-    reasoning = (
-        f"Strategy used: declarative recipe execution on {len(paths)} paths. "
-        f"Empty levels collapsed, near-duplicates merged."
-    )
+            explanation = "I wasn't able to automatically detect a clear category hierarchy."
 
     state["categories"] = PhaseOutput(
         explanation=explanation,
-        reasoning=reasoning,
+        reasoning=f"Strategy: declarative recipe on {len(paths)} paths.",
         suggestions=suggestions,
         approved=False,
         user_feedback=feedback,
     )
-
     state["profile_data"]["category_hierarchy"] = paths
-    state["profile_data"]["category_candidates"] = suggestions
 
-    if needs_input:
-        msg = (
-            f"📂 **Category Discovery**\n\n{explanation}\n\n"
-            f"Could you tell me what categories you use? "
-            f"Type something like: *'We sell Mens > Shoes and Womens > Dresses'*"
-        )
-    else:
-        msg = (
-            f"📂 **Category Discovery**\n\n{explanation}\n\n"
-            f"I found **{len(paths)}** category paths. Do these look right?\n\n"
-            f"If something's off, just tell me — e.g. *\"Remove that path\"* "
-            f"or *\"These don't match my hierarchy\"*."
-        )
+    msg = (
+        f"📂 **Category Discovery**\n\n{explanation}"
+        + (f"\n\nFound **{len(paths)}** paths. Do these look right?" if paths else "")
+    )
     state.setdefault("messages", []).append({"role": "assistant", "content": msg})
-
     logger.info(f"categories | paths={len(paths)} | need_input={needs_input}")
     return state
 

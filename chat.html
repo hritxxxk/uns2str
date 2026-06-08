@@ -667,80 +667,68 @@ function renderReferenceItems(suggestions) {
   return html;
 }
 
-function renderPhaseCard(phase, explanation, suggestions, reasoning) {
-  const phaseNames = {
-    categories: '1\uFE0F\u20E3 Categories',
-    attributes: '2\uFE0F\u20E3 Attributes',
-    references: '3\uFE0F\u20E3 Reference Masters',
-    products: '4\uFE0F\u20E3 Products',
-  };
-  const phaseTitle = phaseNames[phase] || phase;
-
-  let bodyHtml = '';
-
-  if (explanation) {
-    bodyHtml += `<div class="bubble" style="margin-bottom:14px;">${explanation}</div>`;
-  }
+function renderPhaseText(phase, explanation, suggestions, reasoning, sampleData) {
+  let text = explanation || '';
 
   if (suggestions && suggestions.length) {
-    if (phase === 'references') {
-      bodyHtml += renderReferenceItems(suggestions);
-    } else {
-      bodyHtml += renderSuggestions(suggestions);
-    }
+    text += '\n\n' + formatSuggestions(suggestions, phase);
+  }
+
+  if (sampleData && sampleData.length) {
+    text += '\n\n<details style=\"margin-top:8px;font-size:13px;\"><summary style=\"color:var(--muted);cursor:pointer;\">Show sample data</summary><pre style=\"margin-top:6px;background:var(--bg);padding:10px;border-radius:6px;font-size:12px;overflow-x:auto;\">' + escapeHtml(JSON.stringify(sampleData, null, 2)) + '</pre></details>';
   }
 
   if (reasoning) {
-    bodyHtml += `
-      <details style="margin-top:12px;">
-        <summary style="font-size:12px;color:var(--muted);cursor:pointer;">Why I chose this</summary>
-        <div style="font-size:12px;color:var(--muted);margin-top:6px;line-height:1.6;white-space:pre-wrap;">${reasoning}</div>
-      </details>
-    `;
+    text += '\n\n<details style=\"margin-top:4px;font-size:12px;\"><summary style=\"color:var(--muted);cursor:pointer;\">Why I chose this</summary><div style=\"margin-top:4px;color:var(--muted);line-height:1.6;\">' + reasoning + '</div></details>';
   }
 
-  bodyHtml += `
-    <div class="action-bar">
-      <button class="btn btn-primary" onclick="approvePhase(true)">\u2713 Looks Good</button>
-      <button class="btn btn-secondary" onclick="approvePhase(false)">\u2717 Let me adjust</button>
-      <input class="feedback-input" id="feedbackInput" placeholder="Optional: tell me what to change..." />
-    </div>
-  `;
-
-  return `
-    <div class="phase-card">
-      <div class="phase-header">
-        ${phaseTitle}
-        <span class="phase-badge">Awaiting Review</span>
-      </div>
-      <div class="phase-body">${bodyHtml}</div>
-    </div>
-  `;
+  text += '\n\n<em style=\"color:var(--muted);font-size:13px;\">Let me know if this looks right, or tell me what to change.</em>';
+  return text;
 }
 
-function renderDownloadCard(files) {
+function formatSuggestions(suggestions, phase) {
+  let lines = [];
+  for (const s of suggestions) {
+    if (s.type === 'group' && s.label && s.items) {
+      lines.push('**' + s.label + '**');
+      for (const item of s.items) {
+        const col = item.column || '';
+        const mapped = item.mapped_to || '';
+        const conf = item.confidence || 0;
+        if (col && mapped) {
+          lines.push('- ' + col + ' \u2192 ' + mapped + ' (' + conf + '%)');
+        } else if (item.label) {
+          lines.push('- ' + item.label);
+        }
+        if (item.reasoning && item.confidence < 80) {
+          lines.push('  *' + item.reasoning + '*');
+        }
+      }
+    } else if (s.label) {
+      lines.push('- ' + s.label + (s.unique_count ? ' (' + s.unique_count + ' values)' : ''));
+      if (s.messy_values && s.messy_values.length) {
+        lines.push('  \u26a0 Messy: ' + s.messy_values.join(', '));
+      }
+      if (s.normalizations && s.normalizations.length) {
+        lines.push('  \u2705 Normalize: ' + s.normalizations.map(function(n) { return typeof n === 'string' ? n : n.original + ' \u2192 ' + n.normalized; }).join(', '));
+      }
+    }
+  }
+  return lines.join('\n');
+}
+
+function escapeHtml(str) {
+  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function renderDownloadText(files) {
   if (!files || !files.length) return '';
-  const fileNames = files.map(f => {
+  let text = 'Generated **' + files.length + '** PIM template files:\n';
+  for (const f of files) {
     const name = f.split('/').pop() || f;
-    return { name, path: f };
-  });
-
-  let items = fileNames.map(f => `
-    <div class="download-item">
-      <span class="file-icon">📄</span>
-      <div class="file-info">
-        <div class="file-name">${f.name}</div>
-      </div>
-      <a href="/output/${f.name}" class="btn btn-primary" style="font-size:12px;padding:6px 14px;text-decoration:none;" download>Download</a>
-    </div>
-  `).join('');
-
-  return `
-    <div class="download-card">
-      <div class="download-header">✅ Generated PIM Templates</div>
-      ${items}
-    </div>
-  `;
+    text += '\n- \u{1F4C4} [' + name + '](/output/' + name + ')';
+  }
+  return text;
 }
 
 // ─── START ONBOARDING (SSE) ───────────────────────
@@ -785,14 +773,15 @@ function startOnboarding(filePath, sheetName) {
           STATE.currentPhase = data.phase;
           STATE.isStreaming = false;
 
-          addMessage('ai', '', renderPhaseCard(
+          addMessage('ai', renderPhaseText(
             data.phase,
             data.message || data.explanation,
             data.suggestions,
             data.reasoning,
+            data.details || null,
           ));
 
-          phaseIndicator.textContent = `📍 Phase: ${data.phase}`;
+          phaseIndicator.textContent = data.phase ? 'Phase: ' + data.phase : '';
           STATE.isAwaitingFeedback = true;
           setInputEnabled(true);
           status('');
@@ -810,19 +799,14 @@ function startOnboarding(filePath, sheetName) {
 
 // ─── APPROVE / REJECT ─────────────────────────────
 
-async function approvePhase(approved) {
+async function approvePhase(approved, feedback) {
   if (!STATE.threadId || !STATE.currentPhase) return;
 
-  const feedback = document.getElementById('feedbackInput')?.value || '';
+  feedback = feedback || '';
   STATE.isAwaitingFeedback = false;
   STATE.isStreaming = true;
   setInputEnabled(false);
-  status(approved ? 'Processing approval...' : 'Applying feedback...');
-
-  const label = approved ? '\u2713 Approved' : '\u2717 Needs adjustment';
-  addMessage('user', `${label}${feedback ? ': ' + feedback : ''}`);
-
-  document.querySelectorAll('.action-bar .btn').forEach(b => b.disabled = true);
+  status(approved ? 'Processing...' : 'Applying feedback...');
 
   try {
     const resp = await fetch('/interactive/respond', {
@@ -839,7 +823,7 @@ async function approvePhase(approved) {
 
     if (result.status === 'complete') {
       STATE.currentPhase = 'complete';
-      addMessage('ai', result.message || 'All done!', renderDownloadCard(result.generated_files || []));
+      addMessage('ai', (result.message || 'All done!') + '\n\n' + renderDownloadText(result.generated_files || []));
       phaseIndicator.textContent = '✅ Complete';
       status('');
       setInputEnabled(true);
@@ -847,14 +831,15 @@ async function approvePhase(approved) {
       STATE.currentPhase = result.phase;
       STATE.phasesCompleted.push(result.phase);
 
-      addMessage('ai', '', renderPhaseCard(
+      addMessage('ai', renderPhaseText(
         result.phase,
         result.message || result.explanation,
         result.suggestions,
         result.reasoning,
+        null,
       ));
 
-      phaseIndicator.textContent = `📍 Phase: ${result.phase}`;
+      phaseIndicator.textContent = result.phase ? 'Phase: ' + result.phase : '';
       STATE.isAwaitingFeedback = true;
       setInputEnabled(true);
       status('');
@@ -909,9 +894,21 @@ function showFilePicker() {
   chatFeed.appendChild(fileCard);
   scrollToBottom();
 
-  document.getElementById('fileInput').addEventListener('change', (e) => {
+  document.getElementById('fileInput').addEventListener('change', async (e) => {
     if (e.target.files.length) {
-      document.getElementById('filePathInput').value = e.target.files[0].name;
+      const file = e.target.files[0];
+      document.getElementById('filePathInput').value = 'Uploading ' + file.name + '...';
+      const form = new FormData();
+      form.append('file', file);
+      try {
+        const resp = await fetch('/upload', { method: 'POST', body: form });
+        const result = await resp.json();
+        document.getElementById('filePathInput').value = result.path;
+        document.querySelector('.upload-sub').textContent = '✅ File uploaded';
+      } catch (err) {
+        document.getElementById('filePathInput').value = file.name;
+        document.querySelector('.upload-sub').textContent = 'Upload failed, type path instead';
+      }
     }
   });
 }
@@ -951,12 +948,14 @@ function handleChatSend() {
   if (!text) return;
 
   if (STATE.isAwaitingFeedback) {
-    const fb = document.getElementById('feedbackInput');
-    if (fb) {
-      fb.value = text;
-      const affirmWords = ['yes', 'looks good', 'correct', 'fine', 'proceed', 'approve', '\u2713'];
-      const isAffirm = affirmWords.some(w => text.toLowerCase().includes(w));
-      approvePhase(isAffirm);
+    const affirmWords = ['yes', 'looks good', 'correct', 'fine', 'proceed', 'approve', '\u2713', 'looks right', 'go ahead'];
+    const isAffirm = affirmWords.some(w => text.toLowerCase().includes(w));
+    if (isAffirm) {
+      addMessage('user', '\u2713 Looks good');
+      approvePhase(true, '');
+    } else {
+      addMessage('user', text);
+      approvePhase(false, text);
     }
     chatInput.value = '';
     return;

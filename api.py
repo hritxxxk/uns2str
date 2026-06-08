@@ -10,84 +10,19 @@ handler = logging.StreamHandler()
 handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", "%H:%M:%S"))
 logger.addHandler(handler)
 
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File
+from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from graph import graph, vingpt_graph
 from helpers import read_file
 from learning import log_corrections
 from state import ColumnMapping
 
 # ─── Request / Response Schemas ─────────────────────────────────
 
-class StartRequest(BaseModel):
-    file_path: str = Field(description="Path to the source file (CSV, xlsx, xls)")
-    sheet_name: Optional[str] = Field(None, description="Optional sheet name within workbook")
-
-
-class MappingOverride(BaseModel):
-    source_column: str = Field(description="Original column name from source file")
-    target_attribute: str = Field(description="Target PIM attribute name (snake_case)")
-    attribute_type: str = Field(default="Textbox", description="Textbox, Dropdown, RichText, Textarea, MultiSelect, Date, Time")
-    attribute_data_type: str = Field(default="varchar", description="varchar, varchar[], int, float, boolean, date")
-    constraint: bool = Field(default=False, description="True if dropdown/multiselect")
-    length: Optional[int] = Field(None, description="Max field length")
-    mandatory: bool = Field(default=False, description="True if required")
-    attribute_group: str = Field(default="Basic Information", description="Logical group name")
-    confidence: float = Field(default=1.0, description="Human override confidence")
-
-
-class ApproveRequest(BaseModel):
-    thread_id: str = Field(description="Thread ID from /ingest/start")
-    mapping: list[MappingOverride] = Field(description="Corrected column mappings")
-    core_column_detection: Optional[dict[str, str]] = Field(None, description="Override core column detection")
-    category_hierarchy: Optional[list[str]] = Field(None, description="Override category paths")
-
-
 class StatusRequest(BaseModel):
     thread_id: str = Field(description="Thread ID to query")
-
-
-class ChatRequest(BaseModel):
-    thread_id: str = Field(description="Thread ID from /vingpt/start")
-    answers: dict[str, bool] = Field(description="Mapping of question keys to yes/no answers")
-
-
-class StatusResponse(BaseModel):
-    thread_id: str
-    status: str = Field(description="pending_review, completed, or not_found")
-    next_nodes: list[str] = Field(default=[], description="Nodes still pending")
-    has_output_files: bool = False
-    output_files: dict[str, str] = {}
-    summary: Optional[str] = None
-
-
-class StartResponse(BaseModel):
-    thread_id: str
-    status: str = "pending_review"
-    file_path: str
-    sheet_name: Optional[str] = None
-    header_row: int = 0
-    data_start_row: int = 0
-    row_count: int = 0
-    column_count: int = 0
-    mapping: list[dict] = []
-    core_column_detection: dict[str, str] = {}
-    category_hierarchy: list[str] = []
-    validation_errors: list[dict] = []
-    needs_human_input: bool = False
-    correction_cycle: int = 0
-
-
-class ApproveResponse(BaseModel):
-    thread_id: str
-    status: str = Field(description="success or failed")
-    output_files: dict[str, str] = {}
-    attribute_count: int = 0
-    reference_count: int = 0
-    category_count: int = 0
-    summary: str = ""
 
 
 # ─── FastAPI Application ────────────────────────────────────────
@@ -97,6 +32,29 @@ app = FastAPI(
     description="Human-in-the-loop approval workflow for PIM data ingestion",
     version="1.0.0",
 )
+
+# Serve the chat frontend at root
+@app.get("/")
+async def serve_chat():
+    return FileResponse("chat.html", media_type="text/html")
+
+# Serve static files (output xlsx downloads, etc.)
+os.makedirs("output", exist_ok=True)
+app.mount("/output", StaticFiles(directory="output"), name="output")
+
+UPLOAD_DIR = "uploads"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+
+@app.post("/upload")
+async def upload_file(file: UploadFile = File(...)):
+    import shutil
+    safe_name = f"{uuid.uuid4().hex}_{file.filename}"
+    dest = os.path.join(UPLOAD_DIR, safe_name)
+    with open(dest, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+    logger.info(f"upload | file={dest} | original={file.filename}")
+    return {"path": dest, "filename": safe_name}
 
 
 @app.on_event("startup")
@@ -119,354 +77,359 @@ async def check_tracing():
         logger.info("Postgres not configured — using MemorySaver (data lost on restart)")
 
 
-def _build_initial_state(file_path: str, sheet_name: Optional[str] = None) -> dict:
+# def _build_initial_state(file_path: str, sheet_name: Optional[str] = None) -> dict:
 
-    return {
-        "messages": [
-            {
-                "role": "user",
-                "content": f"Profile and map this file: {file_path}"
-                + (f" (sheet: {sheet_name})" if sheet_name else ""),
-            }
-        ],
-        "source_path": file_path,
-        "sheet_name": sheet_name,
-        "structured_response": None,
-        "remaining_steps": 25,
-        "fingerprint": "",
-        "is_known_schema": False,
-        "headers": [],
-        "header_row": 0,
-        "data_start_row": 1,
-        "metadata": [],
-        "profiles": [],
-        "sample_rows": [],
-        "row_count": 0,
-        "column_count": 0,
-        "sheet_count": 0,
-        "sheets": [],
-        "category_candidates": [],
-        "category_path_config": {},
-        "category_hierarchy": [],
-        "mapping": [],
-        "mapping_requires_review": False,
-        "core_column_detection": {},
-        "attribute_definitions": [],
-        "reference_values": {},
-        "output_files": {},
-        "need_user_input": False,
-        "human_approved": False,
-        "validation_errors": [],
-        "validation_message": "",
-        "correction_cycle": 0,
-        "error": None,
-    }
+#     return {
+#         "messages": [
+#             {
+#                 "role": "user",
+#                 "content": f"Profile and map this file: {file_path}"
+#                 + (f" (sheet: {sheet_name})" if sheet_name else ""),
+#             }
+#         ],
+#         "source_path": file_path,
+#         "sheet_name": sheet_name,
+#         "structured_response": None,
+#         "remaining_steps": 25,
+#         "fingerprint": "",
+#         "is_known_schema": False,
+#         "headers": [],
+#         "header_row": 0,
+#         "data_start_row": 1,
+#         "metadata": [],
+#         "profiles": [],
+#         "sample_rows": [],
+#         "row_count": 0,
+#         "column_count": 0,
+#         "sheet_count": 0,
+#         "sheets": [],
+#         "category_candidates": [],
+#         "category_path_config": {},
+#         "category_hierarchy": [],
+#         "mapping": [],
+#         "mapping_requires_review": False,
+#         "core_column_detection": {},
+#         "attribute_definitions": [],
+#         "reference_values": {},
+#         "output_files": {},
+#         "need_user_input": False,
+#         "human_approved": False,
+#         "validation_errors": [],
+#         "validation_message": "",
+#         "correction_cycle": 0,
+#         "error": None,
+#     }
 
 
-def _serialize_mapping(mapping) -> list[dict]:
+# def _serialize_mapping(mapping) -> list[dict]:
 
-    return [
-        {
-            "source_column": m.source_column,
-            "target_attribute": m.target_attribute,
-            "attribute_type": m.attribute_type,
-            "attribute_data_type": m.attribute_data_type,
-            "constraint": m.constraint,
-            "length": m.length,
-            "mandatory": m.mandatory,
-            "attribute_group": m.attribute_group,
-            "confidence": m.confidence,
-        }
-        for m in mapping
-    ]
+#     return [
+#         {
+#             "source_column": m.source_column,
+#             "target_attribute": m.target_attribute,
+#             "attribute_type": m.attribute_type,
+#             "attribute_data_type": m.attribute_data_type,
+#             "constraint": m.constraint,
+#             "length": m.length,
+#             "mandatory": m.mandatory,
+#             "attribute_group": m.attribute_group,
+#             "confidence": m.confidence,
+#         }
+#         for m in mapping
+#     ]
 
 
 # ─── Endpoints ──────────────────────────────────────────────────
 
-@app.post("/ingest/start", response_model=StartResponse)
-def ingest_start(req: StartRequest):
+# ── Legacy endpoints removed ────────────────────────────
+# Pipeline (/ingest/start, /ingest/approve, /ingest/status)
+# and VinGPT (/ingest/chat, /vingpt/start) are deprecated.
+# Use /interactive/start, /interactive/respond, /interactive/status.
+#
+# @app.post("/ingest/start", response_model=StartResponse)
+# def ingest_start(req: StartRequest):
 
-    if not os.path.exists(req.file_path):
-        raise HTTPException(status_code=404, detail=f"File not found: {req.file_path}")
+#     if not os.path.exists(req.file_path):
+#         raise HTTPException(status_code=404, detail=f"File not found: {req.file_path}")
 
-    thread_id = str(uuid.uuid4())
-    config = {"configurable": {"thread_id": thread_id}}
-    initial = _build_initial_state(req.file_path, req.sheet_name)
+#     thread_id = str(uuid.uuid4())
+#     config = {"configurable": {"thread_id": thread_id}}
+#     initial = _build_initial_state(req.file_path, req.sheet_name)
 
-    logger.info(f"start  | thread={thread_id} | file={req.file_path}")
+#     logger.info(f"start  | thread={thread_id} | file={req.file_path}")
 
-    for _event in graph.stream(initial, config):
-        pass
+#     for _event in graph.stream(initial, config):
+#         pass
 
-    state = graph.get_state(config)
-    vals = state.values
-    mapping_raw = vals.get("mapping", [])
-    needs_human = vals.get("need_user_input", False)
+#     state = graph.get_state(config)
+#     vals = state.values
+#     mapping_raw = vals.get("mapping", [])
+#     needs_human = vals.get("need_user_input", False)
 
-    err_count = len(vals.get("validation_errors", []))
-    logger.info(f"start  | thread={thread_id} | mappings={len(mapping_raw)} | errors={err_count} | human={needs_human} | status=pending_review")
+#     err_count = len(vals.get("validation_errors", []))
+#     logger.info(f"start  | thread={thread_id} | mappings={len(mapping_raw)} | errors={err_count} | human={needs_human} | status=pending_review")
 
-    return StartResponse(
-        thread_id=thread_id,
-        status="pending_review",
-        file_path=req.file_path,
-        sheet_name=vals.get("sheet_name"),
-        header_row=vals.get("header_row", 0),
-        data_start_row=vals.get("data_start_row", 0),
-        row_count=vals.get("row_count", 0),
-        column_count=vals.get("column_count", 0),
-        mapping=_serialize_mapping(mapping_raw),
-        core_column_detection=vals.get("core_column_detection", {}),
-        category_hierarchy=vals.get("category_hierarchy", []),
-        validation_errors=vals.get("validation_errors", []),
-        needs_human_input=needs_human,
-        correction_cycle=vals.get("correction_cycle", 0),
-    )
-
-
-@app.post("/ingest/approve", response_model=ApproveResponse)
-def ingest_approve(req: ApproveRequest):
-
-    config = {"configurable": {"thread_id": req.thread_id}}
-
-    try:
-        current_state = graph.get_state(config)
-    except Exception:
-        logger.warning(f"approve | thread={req.thread_id} | not found")
-        raise HTTPException(
-            status_code=404,
-            detail=f"Thread '{req.thread_id}' not found. Start a new ingestion first.",
-        )
-
-    logger.info(f"approve | thread={req.thread_id} | overrides={len(req.mapping)} mappings")
-
-    corrected_mapping = [
-        ColumnMapping(
-            source_column=m.source_column,
-            target_attribute=m.target_attribute,
-            attribute_type=m.attribute_type,
-            attribute_data_type=m.attribute_data_type,
-            constraint=m.constraint,
-            length=m.length,
-            mandatory=m.mandatory,
-            attribute_group=m.attribute_group,
-            confidence=m.confidence,
-        )
-        for m in req.mapping
-    ]
-
-    updates = {
-        "mapping": corrected_mapping,
-        "core_column_detection": req.core_column_detection
-        or current_state.values.get("core_column_detection", {}),
-        "category_hierarchy": req.category_hierarchy
-        or current_state.values.get("category_hierarchy", []),
-        "validation_errors": [],
-        "validation_message": "",
-        "correction_cycle": 0,
-        "need_user_input": False,
-        "human_approved": True,
-    }
-
-    graph.update_state(config, updates, as_node="mapper")
-
-    logger.info(f"approve | thread={req.thread_id} | resuming graph")
-
-    for _ in range(5):
-        for _event in graph.stream(None, config):
-            pass
-        s = graph.get_state(config)
-        if not s.next:
-            break
-
-    final_state = graph.get_state(config)
-    vals = final_state.values
-    output = vals.get("structured_response")
-    files = vals.get("output_files", {})
-
-    if output and output.status == "success":
-        log_corrections(
-            req.mapping,
-            vals.get("profiles", []),
-            fingerprint=vals.get("fingerprint"),
-        )
-        logger.info(f"approve | thread={req.thread_id} | success | files={list(files.values())}")
-        return ApproveResponse(
-            thread_id=req.thread_id,
-            status="success",
-            output_files=files,
-            attribute_count=output.attribute_count,
-            reference_count=output.reference_count,
-            category_count=output.category_count,
-            summary=output.message,
-        )
-
-    errors = vals.get("validation_errors", [])
-    error_summary = "; ".join(
-        f"{e.get('field', '')}: {e.get('issue', '')}" for e in errors[:3]
-    )
-    logger.warning(f"approve | thread={req.thread_id} | failed | {error_summary}")
-    return ApproveResponse(
-        thread_id=req.thread_id,
-        status="failed",
-        output_files=files,
-        summary=f"Approval applied but rendering failed: {error_summary or 'unknown error'}",
-    )
+#     return StartResponse(
+#         thread_id=thread_id,
+#         status="pending_review",
+#         file_path=req.file_path,
+#         sheet_name=vals.get("sheet_name"),
+#         header_row=vals.get("header_row", 0),
+#         data_start_row=vals.get("data_start_row", 0),
+#         row_count=vals.get("row_count", 0),
+#         column_count=vals.get("column_count", 0),
+#         mapping=_serialize_mapping(mapping_raw),
+#         core_column_detection=vals.get("core_column_detection", {}),
+#         category_hierarchy=vals.get("category_hierarchy", []),
+#         validation_errors=vals.get("validation_errors", []),
+#         needs_human_input=needs_human,
+#         correction_cycle=vals.get("correction_cycle", 0),
+#     )
 
 
-@app.post("/ingest/status", response_model=StatusResponse)
-def ingest_status(req: StatusRequest):
+# @app.post("/ingest/approve", response_model=ApproveResponse)
+# def ingest_approve(req: ApproveRequest):
 
-    thread_id = req.thread_id
-    config = {"configurable": {"thread_id": thread_id}}
+#     config = {"configurable": {"thread_id": req.thread_id}}
 
-    try:
-        state = graph.get_state(config)
-    except Exception:
-        logger.info(f"status  | thread={thread_id} | not_found")
-        return StatusResponse(
-            thread_id=thread_id,
-            status="not_found",
-        )
+#     try:
+#         current_state = graph.get_state(config)
+#     except Exception:
+#         logger.warning(f"approve | thread={req.thread_id} | not found")
+#         raise HTTPException(
+#             status_code=404,
+#             detail=f"Thread '{req.thread_id}' not found. Start a new ingestion first.",
+#         )
 
-    vals = state.values
-    if not vals.get("source_path"):
-        logger.info(f"status  | thread={thread_id} | not_found (empty state)")
-        return StatusResponse(
-            thread_id=thread_id,
-            status="not_found",
-        )
-    output = vals.get("structured_response")
-    files = vals.get("output_files", {})
+#     logger.info(f"approve | thread={req.thread_id} | overrides={len(req.mapping)} mappings")
 
-    if output and output.status == "success":
-        return StatusResponse(
-            thread_id=thread_id,
-            status="completed",
-            next_nodes=list(state.next),
-            has_output_files=True,
-            output_files=files,
-            summary=output.message,
-        )
+#     corrected_mapping = [
+#         ColumnMapping(
+#             source_column=m.source_column,
+#             target_attribute=m.target_attribute,
+#             attribute_type=m.attribute_type,
+#             attribute_data_type=m.attribute_data_type,
+#             constraint=m.constraint,
+#             length=m.length,
+#             mandatory=m.mandatory,
+#             attribute_group=m.attribute_group,
+#             confidence=m.confidence,
+#         )
+#         for m in req.mapping
+#     ]
 
-    if state.next:
-        return StatusResponse(
-            thread_id=thread_id,
-            status="pending_review",
-            next_nodes=list(state.next),
-            has_output_files=bool(files),
-            output_files=files,
-        )
+#     updates = {
+#         "mapping": corrected_mapping,
+#         "core_column_detection": req.core_column_detection
+#         or current_state.values.get("core_column_detection", {}),
+#         "category_hierarchy": req.category_hierarchy
+#         or current_state.values.get("category_hierarchy", []),
+#         "validation_errors": [],
+#         "validation_message": "",
+#         "correction_cycle": 0,
+#         "need_user_input": False,
+#         "human_approved": True,
+#     }
 
-    return StatusResponse(
-        thread_id=thread_id,
-        status="completed",
-        next_nodes=[],
-        has_output_files=bool(files),
-        output_files=files,
-        summary=vals.get("validation_message") or "Run completed without success output",
-    )
+#     graph.update_state(config, updates, as_node="mapper")
+
+#     logger.info(f"approve | thread={req.thread_id} | resuming graph")
+
+#     for _ in range(5):
+#         for _event in graph.stream(None, config):
+#             pass
+#         s = graph.get_state(config)
+#         if not s.next:
+#             break
+
+#     final_state = graph.get_state(config)
+#     vals = final_state.values
+#     output = vals.get("structured_response")
+#     files = vals.get("output_files", {})
+
+#     if output and output.status == "success":
+#         log_corrections(
+#             req.mapping,
+#             vals.get("profiles", []),
+#             fingerprint=vals.get("fingerprint"),
+#         )
+#         logger.info(f"approve | thread={req.thread_id} | success | files={list(files.values())}")
+#         return ApproveResponse(
+#             thread_id=req.thread_id,
+#             status="success",
+#             output_files=files,
+#             attribute_count=output.attribute_count,
+#             reference_count=output.reference_count,
+#             category_count=output.category_count,
+#             summary=output.message,
+#         )
+
+#     errors = vals.get("validation_errors", [])
+#     error_summary = "; ".join(
+#         f"{e.get('field', '')}: {e.get('issue', '')}" for e in errors[:3]
+#     )
+#     logger.warning(f"approve | thread={req.thread_id} | failed | {error_summary}")
+#     return ApproveResponse(
+#         thread_id=req.thread_id,
+#         status="failed",
+#         output_files=files,
+#         summary=f"Approval applied but rendering failed: {error_summary or 'unknown error'}",
+#     )
 
 
-@app.post("/ingest/chat")
-async def ingest_chat(req: ChatRequest):
-    config = {"configurable": {"thread_id": req.thread_id}}
+# @app.post("/ingest/status", response_model=StatusResponse)
+# def ingest_status(req: StatusRequest):
 
-    try:
-        current = vingpt_graph.get_state(config)
-    except Exception:
-        raise HTTPException(status_code=404, detail=f"Thread '{req.thread_id}' not found")
+#     thread_id = req.thread_id
+#     config = {"configurable": {"thread_id": thread_id}}
 
-    questions = current.values.get("pending_questions", [])
-    if not questions:
-        raise HTTPException(status_code=400, detail="No pending questions for this thread")
+#     try:
+#         state = graph.get_state(config)
+#     except Exception:
+#         logger.info(f"status  | thread={thread_id} | not_found")
+#         return StatusResponse(
+#             thread_id=thread_id,
+#             status="not_found",
+#         )
 
-    core = dict(current.values.get("core_mappings", {}))
-    custom = dict(current.values.get("custom_mappings", {}))
+#     vals = state.values
+#     if not vals.get("source_path"):
+#         logger.info(f"status  | thread={thread_id} | not_found (empty state)")
+#         return StatusResponse(
+#             thread_id=thread_id,
+#             status="not_found",
+#         )
+#     output = vals.get("structured_response")
+#     files = vals.get("output_files", {})
 
-    from google import genai as _genai
-    gclient = _genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+#     if output and output.status == "success":
+#         return StatusResponse(
+#             thread_id=thread_id,
+#             status="completed",
+#             next_nodes=list(state.next),
+#             has_output_files=True,
+#             output_files=files,
+#             summary=output.message,
+#         )
 
-    resolved_ids = set()
-    for q in questions[:len(req.answers)]:
-        user_text = list(req.answers.values())[questions.index(q)] if isinstance(req.answers, dict) else ""
-        if isinstance(req.answers, list):
-            idx = questions.index(q)
-            user_text = req.answers[idx] if idx < len(req.answers) else ""
+#     if state.next:
+#         return StatusResponse(
+#             thread_id=thread_id,
+#             status="pending_review",
+#             next_nodes=list(state.next),
+#             has_output_files=bool(files),
+#             output_files=files,
+#         )
 
-        intent_prompt = f"""Given this question and user response, determine intent.
+#     return StatusResponse(
+#         thread_id=thread_id,
+#         status="completed",
+#         next_nodes=[],
+#         has_output_files=bool(files),
+#         output_files=files,
+#         summary=vals.get("validation_message") or "Run completed without success output",
+#     )
 
-Question: {q.get("text", "")}
-User response: {user_text}
 
-Return JSON: {{"intent": "approve" | "reject" | "alternative", "alternative_value": "user's suggested name or empty"}}"""
-        resp = gclient.models.generate_content(
-            model="gemini-2.5-flash-lite", contents=intent_prompt,
-            config={"response_mime_type": "application/json"},
-        )
-        try:
-            intent = json.loads(resp.text)
-        except json.JSONDecodeError:
-            intent = {"intent": "approve"}
+# @app.post("/ingest/chat")
+# async def ingest_chat(req: ChatRequest):
+#     config = {"configurable": {"thread_id": req.thread_id}}
 
-        intent_type = intent.get("intent", "approve")
-        q_type = q.get("type", "")
-        q_target = q.get("target", "")
-        q_column = q.get("column", "")
+#     try:
+#         current = vingpt_graph.get_state(config)
+#     except Exception:
+#         raise HTTPException(status_code=404, detail=f"Thread '{req.thread_id}' not found")
 
-        if intent_type == "reject":
-            if q_type == "core" and q_target in core:
-                del core[q_target]
-            elif q_type == "custom" and q.get("columns"):
-                for c in q.get("columns", []):
-                    custom.pop(c, None)
-        elif intent_type == "alternative":
-            alt = intent.get("alternative_value", "").strip()
-            if alt and q_type == "core" and q_target in core:
-                core[q_target] = alt
-            elif alt and q_type == "custom" and q_column:
-                custom[alt] = q_column
-                custom.pop(q_column, None)
+#     questions = current.values.get("pending_questions", [])
+#     if not questions:
+#         raise HTTPException(status_code=400, detail="No pending questions for this thread")
 
-        resolved_ids.add(q["id"])
+#     core = dict(current.values.get("core_mappings", {}))
+#     custom = dict(current.values.get("custom_mappings", {}))
 
-    remaining = [q for q in questions if q.get("id") not in resolved_ids]
-    user_msg = f"User answered {len(resolved_ids)} questions."
-    new_messages = current.values.get("messages", []) + [{"role": "user", "content": user_msg}]
+#     from google import genai as _genai
+#     gclient = _genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
-    vingpt_graph.update_state(config, {
-        "messages": new_messages,
-        "core_mappings": core,
-        "custom_mappings": custom,
-        "pending_questions": remaining,
-    })
+#     resolved_ids = set()
+#     for q in questions[:len(req.answers)]:
+#         user_text = list(req.answers.values())[questions.index(q)] if isinstance(req.answers, dict) else ""
+#         if isinstance(req.answers, list):
+#             idx = questions.index(q)
+#             user_text = req.answers[idx] if idx < len(req.answers) else ""
 
-    for _event in vingpt_graph.stream(None, config):
-        pass
+#         intent_prompt = f"""Given this question and user response, determine intent.
 
-    state = vingpt_graph.get_state(config).values
-    new_questions = state.get("pending_questions", [])
-    core_final = state.get("core_mappings", {})
-    custom_final = state.get("custom_mappings", {})
-    files = state.get("generated_files", [])
-    msgs = state.get("messages", [])
+# Question: {q.get("text", "")}
+# User response: {user_text}
 
-    if new_questions:
-        return {
-            "status": "pending",
-            "thread_id": req.thread_id,
-            "questions": new_questions,
-            "messages": [m for m in msgs[-4:] if isinstance(m, dict)],
-        }
+# Return JSON: {{"intent": "approve" | "reject" | "alternative", "alternative_value": "user's suggested name or empty"}}"""
+#         resp = gclient.models.generate_content(
+#             model="gemini-2.5-flash-lite", contents=intent_prompt,
+#             config={"response_mime_type": "application/json"},
+#         )
+#         try:
+#             intent = json.loads(resp.text)
+#         except json.JSONDecodeError:
+#             intent = {"intent": "approve"}
 
-    return {
-        "status": "complete",
-        "thread_id": req.thread_id,
-        "core_mappings": core_final,
-        "custom_attributes": list(custom_final.keys()),
-        "generated_files": files,
-        "messages": [m for m in msgs[-4:] if isinstance(m, dict)],
-    }
+#         intent_type = intent.get("intent", "approve")
+#         q_type = q.get("type", "")
+#         q_target = q.get("target", "")
+#         q_column = q.get("column", "")
+
+#         if intent_type == "reject":
+#             if q_type == "core" and q_target in core:
+#                 del core[q_target]
+#             elif q_type == "custom" and q.get("columns"):
+#                 for c in q.get("columns", []):
+#                     custom.pop(c, None)
+#         elif intent_type == "alternative":
+#             alt = intent.get("alternative_value", "").strip()
+#             if alt and q_type == "core" and q_target in core:
+#                 core[q_target] = alt
+#             elif alt and q_type == "custom" and q_column:
+#                 custom[alt] = q_column
+#                 custom.pop(q_column, None)
+
+#         resolved_ids.add(q["id"])
+
+#     remaining = [q for q in questions if q.get("id") not in resolved_ids]
+#     user_msg = f"User answered {len(resolved_ids)} questions."
+#     new_messages = current.values.get("messages", []) + [{"role": "user", "content": user_msg}]
+
+#     vingpt_graph.update_state(config, {
+#         "messages": new_messages,
+#         "core_mappings": core,
+#         "custom_mappings": custom,
+#         "pending_questions": remaining,
+#     })
+
+#     for _event in vingpt_graph.stream(None, config):
+#         pass
+
+#     state = vingpt_graph.get_state(config).values
+#     new_questions = state.get("pending_questions", [])
+#     core_final = state.get("core_mappings", {})
+#     custom_final = state.get("custom_mappings", {})
+#     files = state.get("generated_files", [])
+#     msgs = state.get("messages", [])
+
+#     if new_questions:
+#         return {
+#             "status": "pending",
+#             "thread_id": req.thread_id,
+#             "questions": new_questions,
+#             "messages": [m for m in msgs[-4:] if isinstance(m, dict)],
+#         }
+
+#     return {
+#         "status": "complete",
+#         "thread_id": req.thread_id,
+#         "core_mappings": core_final,
+#         "custom_attributes": list(custom_final.keys()),
+#         "generated_files": files,
+#         "messages": [m for m in msgs[-4:] if isinstance(m, dict)],
+#     }
 
 
 # ─── VinGPT SSE Endpoint ────────────────────────────────────────
@@ -487,92 +450,92 @@ def _agent_state_for_triage():
     }
 
 
-@app.post("/vingpt/start")
-async def vingpt_start(req: StartRequest, request: Request):
-    if not os.path.exists(req.file_path):
-        raise HTTPException(status_code=404, detail=f"File not found: {req.file_path}")
+# @app.post("/vingpt/start")
+# async def vingpt_start(req: StartRequest, request: Request):
+#     if not os.path.exists(req.file_path):
+#         raise HTTPException(status_code=404, detail=f"File not found: {req.file_path}")
 
-    auth_header = request.headers.get("authorization", "")
-    thread_id = str(uuid.uuid4())
+#     auth_header = request.headers.get("authorization", "")
+#     thread_id = str(uuid.uuid4())
 
-    async def event_stream():
-        config = {"configurable": {"thread_id": thread_id}}
+#     async def event_stream():
+#         config = {"configurable": {"thread_id": thread_id}}
 
-        yield f"data: {json.dumps({'type': 'progress', 'message': 'Opening file...'})}\n\n"
+#         yield f"data: {json.dumps({'type': 'progress', 'message': 'Opening file...'})}\n\n"
 
-        from graph import triage_source
-        ts = _agent_state_for_triage()
-        ts["source_path"] = req.file_path
-        ts["sheet_name"] = req.sheet_name
-        ts = triage_source(ts)
+#         from graph import triage_source
+#         ts = _agent_state_for_triage()
+#         ts["source_path"] = req.file_path
+#         ts["sheet_name"] = req.sheet_name
+#         ts = triage_source(ts)
 
-        sample_rows = []
-        try:
-            from helpers import read_file, take_rows
-            gen = read_file(req.file_path, ts.get("sheet_name"))
-            skip = ts.get("data_start_row", 1)
-            for _ in range(skip):
-                try: next(gen)
-                except StopIteration: break
-            sample_rows = take_rows(gen, 5)
-        except Exception:
-            pass
+#         sample_rows = []
+#         try:
+#             from helpers import read_file, take_rows
+#             gen = read_file(req.file_path, ts.get("sheet_name"))
+#             skip = ts.get("data_start_row", 1)
+#             for _ in range(skip):
+#                 try: next(gen)
+#                 except StopIteration: break
+#             sample_rows = take_rows(gen, 5)
+#         except Exception:
+#             pass
 
-        sheet = ts.get("sheet_name") or "auto-detected"
-        cols = ts.get("column_count", 0)
-        rows = ts.get("row_count", 0)
-        yield f"data: {json.dumps({'type': 'progress', 'message': f'Detected {cols} columns on sheet \"{sheet}\" ({rows} data rows)'})}\n\n"
+#         sheet = ts.get("sheet_name") or "auto-detected"
+#         cols = ts.get("column_count", 0)
+#         rows = ts.get("row_count", 0)
+#         yield f"data: {json.dumps({'type': 'progress', 'message': f'Detected {cols} columns on sheet \"{sheet}\" ({rows} data rows)'})}\n\n"
 
-        yield f"data: {json.dumps({'type': 'progress', 'message': 'Analyzing column types and sample values...'})}\n\n"
+#         yield f"data: {json.dumps({'type': 'progress', 'message': 'Analyzing column types and sample values...'})}\n\n"
 
-        vingpt_initial = {
-            "messages": [],
-            "file_path": req.file_path,
-            "sheet_name": ts.get("sheet_name"),
-            "profile_data": {
-                "headers": ts.get("headers", []),
-                "sample_rows": sample_rows,
-                "row_count": ts.get("row_count", 0),
-                "column_count": ts.get("column_count", 0),
-                "profiles": ts.get("profiles", []),
-            },
-            "core_mappings": {},
-            "custom_mappings": {},
-            "mapping_confidence": {},
-            "pending_questions": [],
-            "generated_files": [],
-            "jwt_token": auth_header,
-        }
+#         vingpt_initial = {
+#             "messages": [],
+#             "file_path": req.file_path,
+#             "sheet_name": ts.get("sheet_name"),
+#             "profile_data": {
+#                 "headers": ts.get("headers", []),
+#                 "sample_rows": sample_rows,
+#                 "row_count": ts.get("row_count", 0),
+#                 "column_count": ts.get("column_count", 0),
+#                 "profiles": ts.get("profiles", []),
+#             },
+#             "core_mappings": {},
+#             "custom_mappings": {},
+#             "mapping_confidence": {},
+#             "pending_questions": [],
+#             "generated_files": [],
+#             "jwt_token": auth_header,
+#         }
 
-        for event in vingpt_graph.stream(vingpt_initial, config):
-            for node_name, node_data in event.items():
-                if node_name == "__interrupt__":
-                    break
-                if node_name == "analyze":
-                    yield f"data: {json.dumps({'type': 'progress', 'message': 'Mapped core fields and identified custom attributes...'})}\n\n"
-                elif node_name == "check_conf":
-                    yield f"data: {json.dumps({'type': 'progress', 'message': 'Checked mapping confidence...'})}\n\n"
-                elif node_name == "human_input":
-                    yield f"data: {json.dumps({'type': 'progress', 'message': 'Preparing questions for you...'})}\n\n"
-                elif node_name == "render":
-                    yield f"data: {json.dumps({'type': 'progress', 'message': 'All checks passed. Generating templates...'})}\n\n"
+#         for event in vingpt_graph.stream(vingpt_initial, config):
+#             for node_name, node_data in event.items():
+#                 if node_name == "__interrupt__":
+#                     break
+#                 if node_name == "analyze":
+#                     yield f"data: {json.dumps({'type': 'progress', 'message': 'Mapped core fields and identified custom attributes...'})}\n\n"
+#                 elif node_name == "check_conf":
+#                     yield f"data: {json.dumps({'type': 'progress', 'message': 'Checked mapping confidence...'})}\n\n"
+#                 elif node_name == "human_input":
+#                     yield f"data: {json.dumps({'type': 'progress', 'message': 'Preparing questions for you...'})}\n\n"
+#                 elif node_name == "render":
+#                     yield f"data: {json.dumps({'type': 'progress', 'message': 'All checks passed. Generating templates...'})}\n\n"
 
-        state = vingpt_graph.get_state(config).values
-        questions = state.get("pending_questions", [])
-        core = state.get("core_mappings", {})
-        custom = state.get("custom_mappings", {})
+#         state = vingpt_graph.get_state(config).values
+#         questions = state.get("pending_questions", [])
+#         core = state.get("core_mappings", {})
+#         custom = state.get("custom_mappings", {})
 
-        yield f"data: {json.dumps({'type': 'result', 'thread_id': thread_id, 'core_mappings': core, 'custom_attributes': list(custom.keys()), 'questions': questions})}\n\n"
+#         yield f"data: {json.dumps({'type': 'result', 'thread_id': thread_id, 'core_mappings': core, 'custom_attributes': list(custom.keys()), 'questions': questions})}\n\n"
 
-        logger.info(f"vingpt | thread={thread_id} | file={req.file_path} | core={len(core)} | custom={len(custom)} | questions={len(questions)}")
+#         logger.info(f"vingpt | thread={thread_id} | file={req.file_path} | core={len(core)} | custom={len(custom)} | questions={len(questions)}")
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+#     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 # ─── Interactive Graph Endpoints ────────────────────────────────
 
 from interactive_graph import interactive_graph
-from interactive_state import InteractiveIngestionState, PhaseOutput
+from interactive_state import PhaseOutput
 
 
 class InteractiveStartRequest(BaseModel):
@@ -675,27 +638,38 @@ async def interactive_start(req: InteractiveStartRequest, request: Request):
 
         # Stream the graph — runs triage then hits interrupt on categories
         yield f"data: {json.dumps({'type': 'progress', 'message': 'Analysing column structure and values...'})}\n\n"
+         # Auto-advance loop: after each interrupt, check if phase was auto-approved                                                                                                          
+        max_phases = 4                                                                                                                                                                       
+        phases_run = 0                                                                                                                                                                       
+        while phases_run < max_phases:                                                                                                                                                       
+            for event in interactive_graph.stream(None if phases_run > 0 else initial, config): 
+                for node_name, node_data in event.items(): 
+                    if node_name == "__interrupt__": 
+                        break 
 
-        for event in interactive_graph.stream(initial, config):
-            for node_name, node_data in event.items():
-                if node_name == "__interrupt__":
-                    break
+            state_vals = interactive_graph.get_state(config).values 
+            current_phase = state_vals.get("current_phase", "categories") 
+            phase_output = state_vals.get(current_phase, {}) 
+            is_approved = phase_output.get("approved", False) 
 
-        state_vals = interactive_graph.get_state(config).values
+            if is_approved: 
+                phases_run += 1 
+                logger.info(f"interactive | auto-advance | phase={current_phase} | approved=True") 
+                continue 
 
-        # Send the categories phase data
-        cat = state_vals.get("categories", {})
-        yield f"data: {json.dumps({
-            'type': 'phase',
-            'phase': 'categories',
-            'thread_id': thread_id,
-            'explanation': cat.get('explanation', ''),
-            'reasoning': cat.get('reasoning', ''),
-            'suggestions': cat.get('suggestions', []),
-            'message': state_vals.get('messages', [{}])[-1].get('content', '') if state_vals.get('messages') else '',
-        })}\n\n"
+            # Not approved — pause and send to frontend 
+            yield f"data: {json.dumps({ 
+                'type': 'phase', 
+                'phase': current_phase, 
+                'thread_id': thread_id, 
+                'explanation': phase_output.get('explanation', ''), 
+                'reasoning': phase_output.get('reasoning', ''), 
+                'suggestions': phase_output.get('suggestions', []), 
+                'message': state_vals.get('messages', [{}])[-1].get('content', '') if state_vals.get('messages') else '', 
+            })}\n\n" 
+            logger.info(f"interactive | thread={thread_id} | phase={current_phase} | paused") 
+            break 
 
-        logger.info(f"interactive | thread={thread_id} | file={req.file_path} | phase=categories")
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
@@ -755,10 +729,20 @@ async def interactive_respond(req: InteractiveRespondRequest, request: Request):
     for event in interactive_graph.stream(None, config):
         pass
 
-    new_vals = interactive_graph.get_state(config).values
-    new_phase = new_vals.get("current_phase", "complete")
+    new_vals = interactive_graph.get_state(config).values 
+    new_phase = new_vals.get("current_phase", "complete") 
 
-    if new_phase == "complete":
+    # Check if the phase was auto-approved by the graph (bypass) 
+    phase_output = new_vals.get(new_phase, {}) 
+    if isinstance(phase_output, dict) and phase_output.get("approved", False): 
+        phase_order = ["categories", "attributes", "references", "products", "complete"] 
+        if new_phase in phase_order: 
+            idx = phase_order.index(new_phase) 
+            new_phase = phase_order[idx + 1] if idx + 1 < len(phase_order) else "complete" 
+            logger.info(f"interactive | auto-advanced | phase={new_phase} | bypass detected") 
+
+    if new_phase == "complete": 
+
         files = new_vals.get("generated_files", [])
         # Log approved mappings to LangSmith for future learning
         try:
@@ -784,17 +768,61 @@ async def interactive_respond(req: InteractiveRespondRequest, request: Request):
             "message": new_vals.get("messages", [{}])[-1].get("content", "") if new_vals.get("messages") else "",
         }
 
-    # Return the next phase's data
-    next_output = new_vals.get(new_phase, {})
-    return {
-        "status": "continue",
-        "thread_id": req.thread_id,
-        "phase": new_phase,
-        "explanation": next_output.get("explanation", ""),
-        "reasoning": next_output.get("reasoning", ""),
-        "suggestions": next_output.get("suggestions", []),
+    # Auto-advance loop: if we bypassed, keep streaming through subsequent phases 
+    auto_advance_count = 0 
+    while auto_advance_count < 4:  
+        next_output = new_vals.get(new_phase, {})  
+        is_empty = not next_output.get("explanation") and new_phase not in ("complete",) 
+        is_approved = next_output.get("approved", False) 
+        if not is_empty and not is_approved: 
+            break 
+        # Phase was also auto-approved — stream again to run the next phase 
+        auto_advance_count += 1 
+        vals["current_phase"] = new_phase 
+        interactive_graph.update_state(config, vals) 
+        for event in interactive_graph.stream(None, config): 
+            pass 
+        new_vals = interactive_graph.get_state(config).values 
+        new_phase = new_vals.get("current_phase", "complete") 
+        if new_phase == "complete": 
+            break 
+
+    if new_phase == "complete":                                                                                                                                                              
+        files = new_vals.get("generated_files", [])                                                                                                                                          
+        try:                                                                                                                                                                                 
+            from helpers import fingerprint_headers                                                                                                                                          
+            profile = new_vals.get("profile_data", {})                                                                                                                                       
+            headers = profile.get("headers", [])                                                                                                                                             
+            if headers:                                                                                                                                                                      
+                fp = fingerprint_headers(headers) 
+                core = new_vals.get("core_mappings", {}) 
+                custom = new_vals.get("custom_mappings", {}) 
+                mapping_list = [ 
+                    {"source_column": col, "target_attribute": tgt} 
+                    for tgt, col in {**core, **{v: k for k, v in custom.items()}}.items() 
+                ] 
+                log_corrections(mapping_list, profile.get("profiles", []), fingerprint=fp) 
+        except Exception as exc: 
+            logger.warning(f"interactive | log_corrections failed: {exc}") 
+        return { 
+            "status": "complete", 
+            "thread_id": req.thread_id, 
+            "phase": "complete", 
+            "generated_files": files, 
+            "message": new_vals.get("messages", [{}])[-1].get("content", "") if new_vals.get("messages") else "", 
+        } 
+
+
+    next_output = new_vals.get(new_phase, {}) 
+    return { 
+        "status": "continue", 
+        "thread_id": req.thread_id, 
+        "phase": new_phase, 
+        "explanation": next_output.get("explanation", ""), 
+        "reasoning": next_output.get("reasoning", ""), 
+        "suggestions": next_output.get("suggestions", []), 
         "message": new_vals.get("messages", [{}])[-1].get("content", "") if new_vals.get("messages") else "",
-    }
+    } 
 
 
 @app.post("/interactive/status")
