@@ -630,6 +630,13 @@ async def interactive_start(req: InteractiveStartRequest, request: Request):
         sheet_name = ts_state.get("sheet_name") or "auto-detected"
         header_row = ts_state.get("header_row", 0)
 
+        if row_count > 10000:
+            yield f"data: {json.dumps({
+                'type': 'background',
+                'rows': row_count,
+                'message': f'Your file has {row_count} rows. Background processing started — you will be notified when ready.',
+            })}\n\n"
+
         yield f"data: {json.dumps({
             'type': 'progress',
             'message': f'I detected {column_count} columns on sheet \"{sheet_name}\" and verified Row {header_row + 1} contains your headers.',
