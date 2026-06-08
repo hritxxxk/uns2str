@@ -66,6 +66,10 @@ class InteractiveIngestionState(TypedDict):
     references: PhaseOutput
     products: PhaseOutput
 
+    # ── Multi-sheet merge ───────────────────────────────────
+    all_sheets: list
+    sheet_merge: dict
+
     # ── Preserved for downstream rendering ──────────────────
     core_mappings: dict[str, str]
     custom_mappings: dict[str, str]

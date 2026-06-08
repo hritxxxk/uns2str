@@ -549,6 +549,26 @@ class InteractiveRespondRequest(BaseModel):
     feedback: str = Field(default="", description="Optional freeform edits or corrections")
 
 
+def extract_tenant_from_jwt(jwt_token: str) -> str:
+    """Extract tenant_id from JWT payload without verification.
+
+    Base64-decodes the payload section of a JWT (header.payload.signature)
+    and returns the tenant_id claim if present. Returns empty string on failure.
+    """
+    import base64
+    try:
+        parts = jwt_token.split(".")
+        if len(parts) != 3:
+            return ""
+        payload = parts[1]
+        padded = payload + "=" * (4 - len(payload) % 4)
+        decoded = base64.urlsafe_b64decode(padded)
+        claims = json.loads(decoded)
+        return claims.get("tenant_id", claims.get("tenant", claims.get("org_id", "")))
+    except Exception:
+        return ""
+
+
 def _build_interactive_initial(file_path: str, sheet_name: str | None, jwt: str) -> dict:
     return {
         "messages": [],
@@ -566,6 +586,10 @@ def _build_interactive_initial(file_path: str, sheet_name: str | None, jwt: str)
         "mapping_confidence": {},
         "generated_files": [],
         "jwt_token": jwt,
+        "products": PhaseOutput(explanation="", reasoning="", suggestions=[], approved=False, user_feedback=""),
+        "all_sheets": [],
+        "sheet_merge": {},
+        "core_mappings": {},
     }
 
 
@@ -583,7 +607,8 @@ async def interactive_start(req: InteractiveStartRequest, request: Request):
 
     auth_header = request.headers.get("authorization", "")
     thread_id = str(uuid.uuid4())
-    config = {"configurable": {"thread_id": thread_id}}
+    tenant_id = extract_tenant_from_jwt(auth_header)
+    config = {"configurable": {"thread_id": thread_id, "tenant_id": tenant_id}}
 
     async def event_stream():
         initial = _build_interactive_initial(req.file_path, req.sheet_name, auth_header)
@@ -682,6 +707,7 @@ async def interactive_respond(req: InteractiveRespondRequest, request: Request):
     current phase's PhaseOutput, advances to the next phase, and returns
     the new phase's data (or completion result).
     """
+    tenant_id = ""
     config = {"configurable": {"thread_id": req.thread_id}}
 
     try:
@@ -690,6 +716,9 @@ async def interactive_respond(req: InteractiveRespondRequest, request: Request):
         raise HTTPException(status_code=404, detail=f"Thread '{req.thread_id}' not found")
 
     vals = dict(current.values)
+    tenant_id = extract_tenant_from_jwt(vals.get("jwt_token", ""))
+    config["configurable"]["tenant_id"] = tenant_id
+
     phase = vals.get("current_phase", "categories")
 
     if phase == "complete":
@@ -713,14 +742,13 @@ async def interactive_respond(req: InteractiveRespondRequest, request: Request):
         completed.append(phase)
         vals["phases_completed"] = completed
 
-        # Map phase names to their next
         phase_order = ["categories", "attributes", "references", "products", "complete"]
         idx = phase_order.index(phase)
         next_phase = phase_order[idx + 1] if idx + 1 < len(phase_order) else "complete"
         vals["current_phase"] = next_phase
-        logger.info(f"interactive | thread={req.thread_id} | phase={phase} -> {next_phase} | approved")
+        logger.info(f"interactive | thread={req.thread_id} | tenant={tenant_id} | phase={phase} -> {next_phase} | approved")
     else:
-        logger.info(f"interactive | thread={req.thread_id} | phase={phase} | re-run with feedback")
+        logger.info(f"interactive | thread={req.thread_id} | tenant={tenant_id} | phase={phase} | re-run with feedback")
 
     # Update state and resume
     interactive_graph.update_state(config, vals)
@@ -837,6 +865,10 @@ async def interactive_status(req: StatusRequest):
             "status": "not_found",
             "thread_id": req.thread_id,
         }
+
+    vals = state.values
+    tenant_id = extract_tenant_from_jwt(vals.get("jwt_token", ""))
+    config["configurable"]["tenant_id"] = tenant_id
 
     vals = state.values
     phase = vals.get("current_phase", "unknown")

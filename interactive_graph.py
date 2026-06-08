@@ -1,13 +1,3 @@
-"""Interactive 4-phase VinGPT onboarding graph.
-
-Each phase (categories → attributes → references → products) runs its own
-LLM node, populates a structured PhaseOutput with explanations + suggestions,
-then interrupts via interrupt_after to await user feedback.
-
-The API layer advances current_phase before resuming, so the route_by_phase
-conditional edge sends the graph to the correct next node.
-"""
-
 import json
 import os
 import logging
@@ -210,6 +200,31 @@ def triage_interactive(state: InteractiveIngestionState) -> dict:
         "header_row": header_row,
         "data_start_row": data_start_row,
     }
+
+    # ── Multi-sheet: collect all sheet metadata ───────────── 
+    state["all_sheets"] = [] 
+    if ext in (".xlsx", ".xls"): 
+        try: 
+            wb = openpyxl.load_workbook(path, read_only=True, data_only=True) 
+            for sn in sheets: 
+                ws = wb[sn] 
+                header_row = None
+                for r in ws.iter_rows(max_row=5, values_only=True):
+                    vals = [str(c).strip() if c else "" for c in r]
+                    if any(v for v in vals if v):
+                        header_row = vals
+                        break
+                first_row = header_row if header_row else [] 
+                sh = [str(c).strip() if c else "" for c in first_row] 
+                state["all_sheets"].append({ 
+                    "name": sn, 
+                    "headers": [h for h in sh if h], 
+                    "row_count": ws.max_row or 0, 
+                }) 
+            wb.close() 
+        except Exception: 
+            pass 
+
     state["phases_completed"] = []
     state["current_phase"] = "categories"
     state["categories"] = _make_empty_phase()
@@ -250,30 +265,38 @@ def triage_interactive(state: InteractiveIngestionState) -> dict:
 
 
 def parse_category_feedback(feedback: str) -> dict:
-    prompt = f"""
-Analyze this user feedback for product category onboarding.
-Determine if they are explicitly asking to combine or build the category tree from specific columns.
+    prompt = f""" 
+Analyze this user feedback for product category onboarding. 
 
-If the user is asking about something NOT related to PIM/product categories (e.g. general chat, jokes, weather, programming help),
-set is_off_topic = true and provide a polite redirect.
+If the user is asking about something NOT related to PIM/product categories (e.g. general chat, jokes, weather, programming help), 
+set is_off_topic = true and provide a polite redirect. 
 
-User feedback: "{feedback}"
+If the user is responding to a merge question (saying yes/no to linking sheets), set is_merge_approval or is_merge_rejection. 
 
-Return valid JSON:
-{{
-    "is_off_topic": false,
-    "is_direct_override": false,
-    "specified_columns": [],
-    "redirect_message": "",
-    "explanation": ""
-}}
+Otherwise, determine if they are explicitly asking to combine or build the category tree from specific columns. 
 
-JSON:
-"""
+User feedback: "{feedback}" 
+
+Return valid JSON: 
+{{ 
+    "is_off_topic": false, 
+    "is_merge_approval": false, 
+    "is_merge_rejection": false, 
+    "is_direct_override": false, 
+    "specified_columns": [], 
+    "redirect_message": "", 
+    "explanation": "" 
+}} 
+
+JSON: 
+""" 
+
     try:
         return _llm_json(prompt)
-    except Exception:
-        return {"is_off_topic": False, "is_direct_override": False, "specified_columns": [], "redirect_message": "", "explanation": ""}
+    except Exception: 
+        return {"is_off_topic": False, "is_merge_approval": False, "is_merge_rejection": False, 
+                "is_direct_override": False, "specified_columns": [], "redirect_message": "", "explanation": ""} 
+
 
 
 def build_paths_from_generator(file_path: str, sheet_name: str | None, columns: list[str]) -> list[str]:
@@ -302,6 +325,62 @@ def build_paths_from_generator(file_path: str, sheet_name: str | None, columns: 
             paths.add(" > ".join(parts))
     return sorted(list(paths))
 
+def execute_sheet_merge(file_path: str, base_sheet: str, join_sheet: str, key_col: str) -> str | None: 
+    """Merge two sheets by key column, write result to uploads/merged_{uuid}.xlsx""" 
+    import openpyxl 
+    from openpyxl import Workbook 
+    try: 
+        wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True) 
+        # Read base sheet 
+        ws_base = wb[base_sheet] 
+        base_headers = []
+        for r in ws_base.iter_rows(max_row=5, values_only=True):
+            vals = [str(c).strip() if c else "" for c in r]
+            if any(v for v in vals if v):
+                base_headers = vals
+                break 
+        if key_col not in base_headers: 
+            return None 
+        key_idx = base_headers.index(key_col) 
+        base_rows = {} 
+        for row in ws_base.iter_rows(values_only=True): 
+            if row[key_idx] is not None: 
+                base_rows[str(row[key_idx]).strip()] = list(row) 
+        # Read join sheet 
+        ws_join = wb[join_sheet] 
+        join_headers = []
+        for r in ws_join.iter_rows(max_row=5, values_only=True):
+            vals = [str(c).strip() if c else "" for c in r]
+            if any(v for v in vals if v):
+                join_headers = vals
+                break 
+        if key_col not in join_headers: 
+            return None 
+        join_key_idx = join_headers.index(key_col) 
+        join_cols = [c for c in join_headers if c != key_col] 
+        result_headers = base_headers + join_cols 
+        # Write merged 
+        out = Workbook() 
+        ws_out = out.active 
+        ws_out.append(result_headers) 
+        for row in ws_join.iter_rows(values_only=True): 
+            key = str(row[join_key_idx]).strip() if row[join_key_idx] else "" 
+            if key in base_rows: 
+                base_row = base_rows[key] 
+                join_vals = [row[join_headers.index(c)] if c in join_headers and join_headers.index(c) < len(row) else "" for c in join_cols] 
+                ws_out.append(list(base_row) + join_vals) 
+        wb.close() 
+        os.makedirs("uploads", exist_ok=True) 
+        import uuid 
+        out_path = f"uploads/merged_{uuid.uuid4().hex}.xlsx" 
+        out.save(out_path) 
+        out.close() 
+        return out_path 
+    except Exception as exc: 
+        logger.warning(f"merge failed: {exc}") 
+        return None 
+
+
 
 def categories_phase(state: InteractiveIngestionState) -> dict:
     file_path = state["file_path"]
@@ -309,10 +388,63 @@ def categories_phase(state: InteractiveIngestionState) -> dict:
 
     categories_state = state.get("categories", {})
     feedback = categories_state.get("user_feedback", "").strip()
+    
+         # ── Multi-sheet merge detection ───────────────────────── 
+    all_sheets = state.get("all_sheets", []) 
+    sheet_merge = state.get("sheet_merge", {}) 
+    
+    if len(all_sheets) >= 2 and not sheet_merge.get("user_responded") and not feedback: 
+        merge_prompt = f""" 
+This file has {len(all_sheets)} sheets with product data. 
+Here are the sheets and their column headers: 
+{json.dumps(all_sheets, indent=2)} 
+
+Can any two sheets be linked together using a common key column  
+(e.g. SKU, Product ID, Code, Item Code)? 
+Return JSON: 
+{{ 
+    "can_merge": false, 
+    "reasoning": "", 
+    "base_sheet": "", 
+    "join_sheet": "", 
+    "key_column": "", 
+    "user_message": "" 
+}} 
+""" 
+        merge_result = _llm_json(merge_prompt, temperature=0.3)
+        state["sheet_merge"] = merge_result
+        if merge_result.get("can_merge") and not sheet_merge.get("user_responded"):
+            state["sheet_merge"]["pending_message"] = merge_result.get("user_message", "") 
+
 
     # ── Intent parsing bypass ────────────────────────────────
+    merged_path = None
     if feedback:
         decision = parse_category_feedback(feedback)
+        if decision.get("is_merge_approval") or decision.get("is_merge_rejection"):
+            state["sheet_merge"]["user_responded"] = True
+            if decision.get("is_merge_approval"):
+                merge = state.get("sheet_merge", {})
+                merged_path = execute_sheet_merge(
+                    file_path,
+                    merge.get("base_sheet", ""),
+                    merge.get("join_sheet", ""),
+                    merge.get("key_column", ""),
+                )
+                if merged_path:
+                    state["file_path"] = merged_path
+                    msg = f"Merged sheets using '{merge.get('key_column')}' key. Proceeding with the merged data."
+                else:
+                    msg = "Could not merge sheets. Proceeding with the primary sheet only."
+            else:
+                msg = "No problem — I'll proceed with the primary sheet."
+            state.setdefault("messages", []).append({"role": "assistant", "content": msg})
+            return state 
+            msg = f"Merged sheets using '{merge.get('key_column')}' key. Proceeding with the merged data." 
+        else: 
+            msg = "Could not merge sheets. Proceeding with the primary sheet only." 
+            state.setdefault("messages", []).append({"role": "assistant", "content": msg}) 
+            return state 
         if decision.get("is_off_topic"):
             redirect = decision.get("redirect_message", "Let's keep the focus on your product data onboarding.")
             state.setdefault("messages", []).append({"role": "assistant", "content": redirect})
@@ -379,6 +511,10 @@ def categories_phase(state: InteractiveIngestionState) -> dict:
             explanation = f"I discovered **{len(paths)}** category paths from your data."
         else:
             explanation = "I wasn't able to automatically detect a clear category hierarchy."
+
+    merge_pending = state.get("sheet_merge", {}).get("pending_message", "")
+    if merge_pending:
+        explanation = merge_pending + "\n\n" + explanation
 
     state["categories"] = PhaseOutput(
         explanation=explanation,
