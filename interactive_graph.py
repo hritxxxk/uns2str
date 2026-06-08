@@ -639,6 +639,15 @@ attribute_data_type rules:
 - Dates → date
 - Everything else → varchar
 
+Group each custom attribute into a logical PIM group:
+- weight, length, width, height, material, size → Shipping & Dimensions
+- brand, manufacturer, country_of_origin, coo → Brand & Origin
+- processor, ram, storage, battery, screen → Technical Specs
+- heel_height, sole, closure_type, fit → Sizing & Fit
+- meta_title, meta_description, url_key → SEO
+- color, pattern, fabric, care_instructions → Product Details
+- Default → Basic Information
+
 Return JSON:
 {{
   "explanation": "A plain-English summary of the mappings.",
@@ -647,7 +656,7 @@ Return JSON:
     {{
       "type": "group",
       "label": "High-Confidence Core Mappings",
-      "items": [{{"type": "item", "column": "Product Name", "mapped_to": "sku_name", "attribute_type": "Textbox", "attribute_data_type": "varchar", "confidence": 100, "reasoning": "..."}}]
+      "items": [{{"type": "item", "column": "Product Name", "mapped_to": "sku_name", "attribute_type": "Textbox", "attribute_data_type": "varchar", "attribute_group": "Basic Information", "confidence": 100, "reasoning": "..."}}]
     }},
     {{"type": "group", "label": "Custom Dynamic Attributes", "items": [...]}},
     {{"type": "group", "label": "Low-Confidence / Needs Review", "items": [...]}}
@@ -791,19 +800,19 @@ def attributes_phase(state: InteractiveIngestionState) -> dict:
             state["custom_mappings"] = custom
             all_items = []
             for tgt, col in core.items():
-                all_items.append({"column": col, "mapped_to": tgt, "attribute_type": "Textbox", "attribute_data_type": "varchar", "confidence": 100})
+                all_items.append({"column": col, "mapped_to": tgt, "attribute_type": "Textbox", "attribute_data_type": "varchar", "attribute_group": "Basic Information", "confidence": 100})
             for col, tgt in custom.items():
-                all_items.append({"column": col, "mapped_to": tgt, "attribute_type": "Textbox", "attribute_data_type": "varchar", "confidence": 100})
+                all_items.append({"column": col, "mapped_to": tgt, "attribute_type": "Textbox", "attribute_data_type": "varchar", "attribute_group": "Basic Information", "confidence": 100})
             state["attributes"] = PhaseOutput(
                 explanation=decision.get("explanation", "Applied your changes."),
                 reasoning="Bypass: user-specified mapping overrides.",
                 suggestions=[
                     {"type": "group", "label": "High-Confidence Core Mappings", "items": [
-                        {"type": "item", "column": col, "mapped_to": tgt, "attribute_type": "Textbox", "attribute_data_type": "varchar", "confidence": 100, "reasoning": "User override"}
+                        {"type": "item", "column": col, "mapped_to": tgt, "attribute_type": "Textbox", "attribute_data_type": "varchar", "attribute_group": "Basic Information", "confidence": 100, "reasoning": "User override"}
                         for tgt, col in core.items()
                     ]},
                     {"type": "group", "label": "Custom Dynamic Attributes", "items": [
-                        {"type": "item", "column": col, "mapped_to": tgt, "attribute_type": "Textbox", "attribute_data_type": "varchar", "confidence": 100, "reasoning": "User override"}
+                        {"type": "item", "column": col, "mapped_to": tgt, "attribute_type": "Textbox", "attribute_data_type": "varchar", "attribute_group": "Basic Information", "confidence": 100, "reasoning": "User override"}
                         for col, tgt in custom.items()
                     ]},
                 ],
@@ -1003,12 +1012,14 @@ def _apply_cached_mappings(state, cached, headers, fp):
             core_items.append({"type": "item", "column": src, "mapped_to": tgt,
                                "attribute_type": m.get("attribute_type", "Textbox"),
                                "attribute_data_type": m.get("attribute_data_type", "varchar"),
+                               "attribute_group": m.get("attribute_group", "Basic Information"),
                                "confidence": 100, "reasoning": "Cached from previous session"})
         else:
             custom_group[src] = src
             custom_items.append({"type": "item", "column": src, "mapped_to": tgt,
                                  "attribute_type": m.get("attribute_type", "Textbox"),
                                  "attribute_data_type": m.get("attribute_data_type", "varchar"),
+                                 "attribute_group": m.get("attribute_group", "Basic Information"),
                                  "confidence": 100, "reasoning": "Cached from previous session"})
     if core_items:
         suggestions.append({"type": "group", "label": "High-Confidence Core Mappings", "items": core_items})

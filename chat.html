@@ -696,7 +696,7 @@ function formatSuggestions(suggestions, phase) {
         const mapped = item.mapped_to || '';
         const conf = item.confidence || 0;
         if (col && mapped) {
-          lines.push('- ' + col + ' \u2192 ' + mapped + ' (' + conf + '%)');
+          lines.push('- ' + col + ' \u2192 ' + mapped + ' (' + conf + '%)' + (item.attribute_group ? ' [' + item.attribute_group + ']' : ''));
         } else if (item.label) {
           lines.push('- ' + item.label);
         }
