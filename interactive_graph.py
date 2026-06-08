@@ -17,14 +17,20 @@ from google import genai as google_genai
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
 
+import re
+
 from interactive_state import InteractiveIngestionState, PhaseOutput, IngestionPhase
 from helpers import (
     read_file, take_rows, fingerprint_headers, extract_image_columns,
     build_product_rows, download_blank_template,
+    load_cached_mapping, save_cached_mapping,
 )
 from tools.mapping import build_attribute_definitions
 from tools.references import extract_reference_values
 from tools.rendering import render_all_templates
+from tools.profiling import profile_columns
+from learning import fetch_similar_examples
+from state import PIM_DEFAULTS, ColumnMapping
 
 load_dotenv()
 logger = logging.getLogger("pim_interactive")
@@ -41,7 +47,6 @@ client = google_genai.Client(api_key=api_key)
 # ─── Helpers ──────────────────────────────────────────────────────
 
 def _llm_json(prompt: str, temperature: float = 1.0) -> dict:
-    """Call Gemini with JSON mode and return parsed dict."""
     resp = client.models.generate_content(
         model="gemini-2.5-flash-lite",
         contents=prompt,
@@ -65,6 +70,70 @@ def _make_empty_phase() -> PhaseOutput:
         approved=False,
         user_feedback="",
     )
+
+
+def _check_type_compatibility(samples: list[str], declared_type: str) -> list[str]:
+    if declared_type in ("varchar", "varchar[]"):
+        return []
+    non_matching = []
+    for v in samples:
+        v = v.strip()
+        if not v:
+            continue
+        if declared_type == "int":
+            try:
+                int(v)
+            except ValueError:
+                non_matching.append(v)
+        elif declared_type == "float":
+            cleaned = v.replace(",", "").replace("$", "").replace("€", "").replace("£", "").replace("₹", "")
+            try:
+                float(cleaned)
+            except ValueError:
+                non_matching.append(v)
+        elif declared_type == "boolean":
+            if v.lower() not in ("true", "false", "yes", "no", "0", "1", "y", "n", "t", "f"):
+                non_matching.append(v)
+        elif declared_type == "date":
+            date_patterns = [
+                r"^\d{4}-\d{2}-\d{2}$",
+                r"^\d{2}/\d{2}/\d{4}$",
+                r"^\d{2}-\d{2}-\d{4}$",
+                r"^\d{4}/\d{2}/\d{2}$",
+                r"^\d{2}\.\d{2}\.\d{4}$",
+            ]
+            if not any(re.match(p, v) for p in date_patterns):
+                non_matching.append(v)
+    return non_matching
+
+
+def _validate_mappings(headers: list[str], mapping_data: list[dict], sample_rows_data: list[list]) -> list[dict]:
+    errors = []
+    col_index = {h: i for i, h in enumerate(headers)}
+    for item in mapping_data:
+        src = item.get("column", "")
+        declared_type = item.get("data_type", "varchar")
+        target = item.get("mapped_to", "")
+        if not src or not target:
+            continue
+        if src not in col_index:
+            errors.append({"field": target, "issue": f"source_column '{src}' not found in headers", "samples": []})
+            continue
+        idx = col_index[src]
+        samples = []
+        for row in sample_rows_data:
+            if idx < len(row) and row[idx] is not None and str(row[idx]).strip():
+                samples.append(str(row[idx]).strip())
+        if not samples:
+            continue
+        bad = _check_type_compatibility(samples, declared_type)
+        if bad and len(bad) / max(len(samples), 1) >= 0.2:
+            errors.append({"field": target, "issue": f"Type mismatch: declared '{declared_type}' but samples don't conform", "samples": bad[:5]})
+    mapped_targets = {m.get("mapped_to", "") for m in mapping_data}
+    for default in PIM_DEFAULTS:
+        if default not in mapped_targets:
+            errors.append({"field": default, "issue": f"Missing mandatory PIM default: '{default}' has no mapping", "samples": []})
+    return errors
 
 
 # ─── Triage Node ─────────────────────────────────────────────────
@@ -287,18 +356,26 @@ ATTRIBUTES_PROMPT = """You are a VinAI PIM onboarding assistant. The user has co
 Current phase: Attribute Mapping
 
 File: {filename}
-Headers: {headers}
+
+Column profiles (unique counts + samples):
+{profiles}
+
 Sample data (first 3 rows):
 {samples}
+
+Historical corrections for similar columns:
+{few_shots}
 
 The user's feedback from the previous attempt (if any):
 {feedback}
 
-Map each source column to a PIM attribute. Group your results into three buckets:
+Previous validation errors (fix these):
+{validation_errors_text}
+
+Map each source column to a PIM attribute. Include BOTH `attribute_type` AND `attribute_data_type` for every mapping. Group your results into three buckets:
 
 1. **High-Confidence Core Mappings** — system-critical fields (sku_name, code, mrp)
-   that are clearly identified. Use simple language — e.g. "The 'Price' column has
-   decimals like 49.99, so I'll store it as a standard decimal number."
+   that are clearly identified. Use simple language.
 
 2. **Custom Dynamic Attributes** — proprietary columns (e.g. "Heel Height",
    "Upper Material") that should be preserved as-is with their source name.
@@ -316,9 +393,16 @@ attribute_type rules:
 - Date fields → Date
 - Image URLs → Textbox, length=2048
 
+attribute_data_type rules:
+- Prices, decimals → float
+- Counts, quantities → int
+- Yes/No fields → boolean
+- Dates → date
+- Everything else → varchar
+
 Return JSON:
 {{
-  "explanation": "A plain-English summary of what you found — avoid jargon like 'float64' or 'nullable'.",
+  "explanation": "A plain-English summary of what you found.",
   "reasoning": "Technical breakdown for users who want details.",
   "suggestions": [
     {{
@@ -329,6 +413,8 @@ Return JSON:
           "type": "item",
           "column": "Product Name",
           "mapped_to": "sku_name",
+          "attribute_type": "Textbox",
+          "attribute_data_type": "varchar",
           "confidence": 100,
           "reasoning": "Standard product title field"
         }}
@@ -347,6 +433,8 @@ Return JSON:
           "type": "item",
           "column": "Manufacturer Tag",
           "mapped_to": null,
+          "attribute_type": "Textbox",
+          "attribute_data_type": "varchar",
           "confidence": 55,
           "reasoning": "Could be brand, manufacturer, or internal code",
           "options": ["brand", "manufacturer", "skip"]
@@ -362,6 +450,7 @@ def attributes_phase(state: InteractiveIngestionState) -> dict:
     profile = state.get("profile_data", {})
     headers = profile.get("headers", [])
     feedback = state.get("attributes", {}).get("user_feedback", "")
+    cycle = state.get("attributes", {}).get("correction_cycle", 0)
 
     gen = read_file(state["file_path"], state.get("sheet_name"))
     hr = profile.get("header_row", 0)
@@ -371,7 +460,9 @@ def attributes_phase(state: InteractiveIngestionState) -> dict:
             next(gen)
         except StopIteration:
             break
-    sample_rows = take_rows(gen, 5)
+    all_data_rows = list(gen)
+
+    sample_rows = all_data_rows[:5]
     samples = []
     for row in sample_rows:
         s = {}
@@ -380,24 +471,87 @@ def attributes_phase(state: InteractiveIngestionState) -> dict:
                 s[h] = str(row[i]).strip()[:80]
         samples.append(s)
 
+    cols = profile_columns.invoke({"headers": headers, "rows": all_data_rows})
+    col_profiles = []
+    for c in cols[:40]:
+        col_profiles.append({
+            "name": c["name"],
+            "unique": c["unique"],
+            "non_null": c["non_null"],
+            "sample": c["sample"][:3],
+        })
+
+    fp = fingerprint_headers(headers)
+    cached = load_cached_mapping(fp)
+    if cached and not feedback and cycle == 0:
+        return _apply_cached_mappings(state, cached, headers, fp)
+
+    few_shots = []
+    seen_targets = set()
+    for h in headers[:10]:
+        vals = []
+        for row in all_data_rows:
+            idx = headers.index(h)
+            if idx < len(row) and row[idx] is not None and str(row[idx]).strip():
+                vals.append(str(row[idx]).strip()[:40])
+        if not vals:
+            continue
+        matches = fetch_similar_examples(h, vals, k=2)
+        for m in matches:
+            tgt = m["target_attribute"]
+            if tgt and tgt not in seen_targets:
+                few_shots.append(m)
+                seen_targets.add(tgt)
+                if len(few_shots) >= 5:
+                    break
+        if len(few_shots) >= 5:
+            break
+
+    few_shots_text = "\n".join(
+        f'- "{fs["column_name"]}" → {fs["target_attribute"]} ({fs["attribute_type"]}, {fs["attribute_data_type"]}, mandatory={str(fs["mandatory"]).lower()})'
+        for fs in few_shots
+    ) if few_shots else "(no historical corrections available)"
+
+    previous_errors = state.get("attributes", {}).get("validation_errors", [])
+    validation_errors_text = "\n".join(
+        f'- {e["field"]}: {e["issue"]}'
+        for e in previous_errors
+    ) if previous_errors else "(none)"
+
     prompt = ATTRIBUTES_PROMPT.format(
         filename=os.path.basename(state["file_path"]),
-        headers=", ".join(headers[:30]),
+        profiles=json.dumps(col_profiles, indent=2),
         samples=json.dumps(samples, indent=2),
+        few_shots=few_shots_text,
         feedback=feedback or "(none — first attempt)",
+        validation_errors_text=validation_errors_text,
     )
 
     result = _llm_json(prompt)
 
-    state["attributes"] = PhaseOutput(
-        explanation=result.get("explanation", ""),
-        reasoning=result.get("reasoning", ""),
-        suggestions=result.get("suggestions", []),
-        approved=False,
-        user_feedback=feedback,
-    )
+    all_items = []
+    for group in result.get("suggestions", []):
+        if group.get("type") == "group":
+            for item in group.get("items", []):
+                if item.get("type") == "item" and item.get("column") and item.get("mapped_to"):
+                    all_items.append(item)
 
-    # Extract core mappings for downstream use
+    validation_errors = _validate_mappings(headers, all_items, all_data_rows[:10])
+
+    max_retries = 3
+    if validation_errors and cycle < max_retries and not feedback:
+        new_cycle = cycle + 1
+        state.setdefault("attributes", {})["correction_cycle"] = new_cycle
+        state.setdefault("attributes", {})["validation_errors"] = validation_errors
+        logger.info(f"attributes | auto-retry {new_cycle}/{max_retries} | errors={len(validation_errors)}")
+        return attributes_phase(state)
+
+    cache_data = [{"source_column": it["column"], "target_attribute": it["mapped_to"],
+                    "attribute_type": it.get("attribute_type", "Textbox"),
+                    "attribute_data_type": it.get("attribute_data_type", "varchar")}
+                   for it in all_items]
+    save_cached_mapping(fp, cache_data)
+
     core_group = {}
     custom_group = {}
     for group in result.get("suggestions", []):
@@ -415,14 +569,73 @@ def attributes_phase(state: InteractiveIngestionState) -> dict:
     state["core_mappings"] = core_group
     state["custom_mappings"] = custom_group
 
+    explanation = result.get("explanation", "")
+    if validation_errors:
+        error_text = "; ".join(f'{e["field"]}: {e["issue"]}' for e in validation_errors[:3])
+        explanation += f"\n\n\u26a0\ufe0f **{len(validation_errors)} validation issue(s)**: {error_text}"
+
+    state["attributes"] = PhaseOutput(
+        explanation=explanation,
+        reasoning=result.get("reasoning", ""),
+        suggestions=result.get("suggestions", []),
+        approved=False,
+        user_feedback=feedback,
+    )
+    if validation_errors:
+        state["attributes"]["validation_errors"] = validation_errors
+
     msg = (
-        f"📋 **Attribute Mapping**\n\n{result.get('explanation', '')}\n\n"
+        f"\ud83d\udccb **Attribute Mapping**\n\n{explanation}\n\n"
         f"I've grouped the mappings below. You can accept all, or tell me "
         f"about specific ones you'd like to change."
     )
     state.setdefault("messages", []).append({"role": "assistant", "content": msg})
 
-    logger.info(f"attributes | core={len(core_group)} custom={len(custom_group)}")
+    logger.info(f"attributes | core={len(core_group)} custom={len(custom_group)} errors={len(validation_errors)}")
+    return state
+
+
+def _apply_cached_mappings(state, cached, headers, fp):
+    core_group = {}
+    custom_group = {}
+    suggestions = []
+    core_items = []
+    custom_items = []
+    for m in cached:
+        tgt = m.get("target_attribute", "")
+        src = m.get("source_column", "")
+        if tgt in ("sku_name", "code", "mrp"):
+            core_group[tgt] = src
+            core_items.append({"type": "item", "column": src, "mapped_to": tgt,
+                               "attribute_type": m.get("attribute_type", "Textbox"),
+                               "attribute_data_type": m.get("attribute_data_type", "varchar"),
+                               "confidence": 100, "reasoning": "Cached from previous session"})
+        else:
+            custom_group[src] = src
+            custom_items.append({"type": "item", "column": src, "mapped_to": tgt,
+                                 "attribute_type": m.get("attribute_type", "Textbox"),
+                                 "attribute_data_type": m.get("attribute_data_type", "varchar"),
+                                 "confidence": 100, "reasoning": "Cached from previous session"})
+    if core_items:
+        suggestions.append({"type": "group", "label": "High-Confidence Core Mappings", "items": core_items})
+    if custom_items:
+        suggestions.append({"type": "group", "label": "Custom Dynamic Attributes", "items": custom_items})
+    state["core_mappings"] = core_group
+    state["custom_mappings"] = custom_group
+    state["attributes"] = PhaseOutput(
+        explanation=f"Loaded {len(cached)} mappings from cache (fingerprint: {fp}).",
+        reasoning="",
+        suggestions=suggestions,
+        approved=False,
+        user_feedback="",
+    )
+    msg = (
+        f"\ud83d\udccb **Attribute Mapping**\n\nI recognized this file structure — "
+        f"I've loaded **{len(cached)}** saved mappings from a previous session.\n\n"
+        f"You can accept all, or tell me about specific ones you'd like to change."
+    )
+    state.setdefault("messages", []).append({"role": "assistant", "content": msg})
+    logger.info(f"attributes | cache hit | fp={fp} | mappings={len(cached)}")
     return state
 
 
