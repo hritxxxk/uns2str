@@ -645,10 +645,8 @@ REFERENCES_PROMPT = """You are a VinAI PIM onboarding assistant. The user has co
 
 Current phase: Reference Masters
 
-File: {filename}
-Headers: {headers}
-Column profiles (unique counts + samples):
-{profiles}
+Here are the reference values I extracted from the data:
+{refs_summary}
 
 The user's feedback from the previous attempt (if any):
 {feedback}
@@ -657,39 +655,25 @@ Attributes marked as Dropdown or MultiSelect in a PIM need a strict,
 predefined list of allowed options — called Reference Masters. This
 prevents data-entry mistakes and typos.
 
-From the column profiles, identify which columns are candidates for
-Reference Masters (have low-moderate unique value counts, look like
-brands/colours/sizes/materials/etc.).
-
-For each candidate:
-1. List the unique values you found
+Review the extracted reference masters above and:
+1. Generate an educational explanation of what Reference Masters are and why they matter
 2. Flag any messy/inconsistent values (e.g. "MED" vs "M", "Blk" vs "Black")
-3. Suggest normalizations
+3. Suggest normalizations for messy values
 
 Return JSON:
 {{
   "explanation": "An educational paragraph explaining what Reference Masters are and why they matter.",
-  "reasoning": "Technical details about values found and normalizations proposed.",
+  "reasoning": "Details about normalizations proposed.",
   "suggestions": [
     {{
       "type": "item",
       "label": "Brand",
       "column": "Brand Name",
       "unique_count": 15,
-      "values": ["Sony", "Bose", "Samsung", ...],
+      "values": ["Sony", "Bose", "Samsung"],
       "messy_values": [],
       "normalizations": [],
       "confidence": 100
-    }},
-    {{
-      "type": "item",
-      "label": "Size",
-      "column": "Size",
-      "unique_count": 6,
-      "values": ["S", "M", "L", "XL", "MED", "LRG"],
-      "messy_values": ["MED", "LRG"],
-      "normalizations": ["MED → M", "LRG → L"],
-      "confidence": 85
     }}
   ]
 }}
@@ -701,7 +685,6 @@ def references_phase(state: InteractiveIngestionState) -> dict:
     headers = profile.get("headers", [])
     feedback = state.get("references", {}).get("user_feedback", "")
 
-    # Build column profiles from data
     gen = read_file(state["file_path"], state.get("sheet_name"))
     hr = profile.get("header_row", 0)
     dr = profile.get("data_start_row", hr + 1)
@@ -710,47 +693,75 @@ def references_phase(state: InteractiveIngestionState) -> dict:
             next(gen)
         except StopIteration:
             break
-    rows = list(gen)
+    all_data_rows = list(gen)
 
-    col_profiles = []
-    for i, h in enumerate(headers):
-        vals = []
-        for row in rows:
-            if i < len(row) and row[i] is not None and str(row[i]).strip():
-                vals.append(str(row[i]).strip())
-        if vals:
-            unique = sorted(set(vals))
-            col_profiles.append({
-                "name": h,
-                "unique_count": len(unique),
-                "samples": unique[:8],
-            })
+    # Profile all columns (gets unique_values for reference extraction)
+    cols = profile_columns.invoke({"headers": headers, "rows": all_data_rows})
+
+    # Use programmatic extract_reference_values with the mappings we have
+    mapping_dicts = []
+    for target, col in state.get("core_mappings", {}).items():
+        if col:
+            mapping_dicts.append({"source_column": col, "target_attribute": target, "attribute_type": "Textbox"})
+    for col, preserved in state.get("custom_mappings", {}).items():
+        mapping_dicts.append({"source_column": col, "target_attribute": preserved, "attribute_type": "Dropdown"})
+
+    refs = extract_reference_values.invoke({"mappings": mapping_dicts, "profiles": cols})
+
+    # Build suggestions from programmatic refs
+    suggestions = []
+    for master_name, values in refs.items():
+        suggestions.append({
+            "type": "item",
+            "label": master_name.replace(" Master", ""),
+            "column": master_name,
+            "unique_count": len(values),
+            "values": values[:20],
+            "messy_values": [],
+            "normalizations": [],
+            "confidence": 100,
+        })
+
+    # Use LLM to add educational explanation + detect messy values
+    refs_summary = "\n".join(
+        f'- {k}: {len(v)} values — {v[:5]}'
+        for k, v in refs.items()
+    ) if refs else "(no reference masters detected)"
 
     prompt = REFERENCES_PROMPT.format(
-        filename=os.path.basename(state["file_path"]),
-        headers=", ".join(headers[:30]),
-        profiles=json.dumps(col_profiles[:30], indent=2),
+        refs_summary=refs_summary,
         feedback=feedback or "(none — first attempt)",
     )
-
     result = _llm_json(prompt)
+
+    # Merge LLM's messy value detection into programmatic suggestions
+    llm_suggestions = result.get("suggestions", [])
+    for llm_s in llm_suggestions:
+        llm_label = llm_s.get("label", "")
+        for s in suggestions:
+            if s["label"] == llm_label or s["column"] == llm_s.get("column", ""):
+                if llm_s.get("messy_values"):
+                    s["messy_values"] = llm_s["messy_values"]
+                if llm_s.get("normalizations"):
+                    s["normalizations"] = llm_s["normalizations"]
+                break
 
     state["references"] = PhaseOutput(
         explanation=result.get("explanation", ""),
         reasoning=result.get("reasoning", ""),
-        suggestions=result.get("suggestions", []),
+        suggestions=suggestions,
         approved=False,
         user_feedback=feedback,
     )
 
     msg = (
-        f"📚 **Reference Masters**\n\n{result.get('explanation', '')}\n\n"
-        f"Here's what I found. Let me know if any values need cleaning up!"
+        f"\ud83d\udcda **Reference Masters**\n\n{result.get('explanation', '')}\n\n"
+        f"I extracted **{len(suggestions)}** reference lists from your data. "
+        f"Let me know if any values need cleaning up!"
     )
     state.setdefault("messages", []).append({"role": "assistant", "content": msg})
 
-    ref_count = len(result.get("suggestions", []))
-    logger.info(f"references | masters={ref_count}")
+    logger.info(f"references | masters={len(suggestions)}")
     return state
 
 
@@ -761,46 +772,25 @@ Reference Masters.
 
 Current phase: Product Preview
 
-File: {filename}
-Headers: {headers}
-Sample product rows (first 5):
-{samples}
+Here is a preview of the first 3 mapped products:
+{preview}
 
 The user's feedback from the previous attempt (if any):
 {feedback}
 
-Now we compile the final Product Master template. Explain to the user:
+The product sheet will have:
+- Fixed columns: Category Path, Variant Attributes, Parent SKU, Code, sku_name, mrp
+- Dynamic columns: one per attribute from the mapping phase
+- Image URL columns: image_1 through image_9
 
-1. The product sheet will have:
-   - Fixed columns: Category Path, Variant Attributes, Parent SKU, Code, sku_name, mrp
-   - Dynamic columns: one per attribute (from the attribute mapping phase)
-   - Image URL columns: image_1 through image_9
-
-2. How many products will be in the output
-
-3. What the next step is (downloading / uploading)
+Explain to the user what they're seeing and confirm they're happy to proceed.
 
 Return JSON:
 {{
-  "explanation": "A friendly summary of what the product sheet will look like.",
+  "explanation": "A friendly summary of what the product sheet will look like, referencing the preview.",
   "reasoning": "Technical breakdown of row count, columns, and image handling.",
-  "suggestions": [
-    {{
-      "type": "item",
-      "label": "Total products",
-      "value": "{row_count}",
-      "reasoning": "Based on data rows in the source file"
-    }},
-    {{
-      "type": "item",
-      "label": "Total columns in output",
-      "value": "{col_count}",
-      "reasoning": "Fixed columns + dynamic attributes + image columns"
-    }}
-  ]
+  "suggestions": []
 }}
-
-IMPORTANT: Use the actual row_count and col_count values, not placeholders.
 """
 
 
@@ -819,52 +809,57 @@ def products_phase(state: InteractiveIngestionState) -> dict:
             next(gen)
         except StopIteration:
             break
-    sample_rows = take_rows(gen, 5)
-    samples = []
-    for row in sample_rows:
-        s = {}
-        for i, h in enumerate(headers):
-            if i < len(row) and row[i] is not None and str(row[i]).strip():
-                s[h] = str(row[i]).strip()[:60]
-        samples.append(s)
+    all_data_rows = list(gen)
 
-    prompt = PRODUCTS_PROMPT.format(
-        filename=os.path.basename(state["file_path"]),
-        headers=", ".join(headers[:20]),
-        samples=json.dumps(samples, indent=2),
-        feedback=feedback or "(none — first attempt)",
-        row_count=row_count,
-        col_count=column_count + 9,  # base cols + up to 9 image cols
+    # Build product rows programmatically (same as render does)
+    row_mappings = []
+    for target, col in state.get("core_mappings", {}).items():
+        if col:
+            row_mappings.append({"source_column": col, "target_attribute": target})
+    for col, preserved in state.get("custom_mappings", {}).items():
+        row_mappings.append({"source_column": col, "target_attribute": preserved})
+
+    img_cols = extract_image_columns(headers, row_mappings)
+    product_rows = build_product_rows(
+        headers, all_data_rows, row_mappings, img_cols, state.get("core_mappings"),
     )
 
+    # Build a preview of the first 3 mapped products
+    preview_rows = []
+    for pr in product_rows[:3]:
+        row_preview = {k: str(v)[:40] for k, v in list(pr.items())[:8]}
+        preview_rows.append(row_preview)
+
+    attr_count = len(state.get("core_mappings", {})) + len(state.get("custom_mappings", {}))
+    img_col_count = len(img_cols[:9])
+    total_cols = 6 + attr_count + img_col_count
+
+    preview_text = json.dumps(preview_rows, indent=2) if preview_rows else "(no product rows)"
+
+    prompt = PRODUCTS_PROMPT.format(
+        preview=preview_text,
+        feedback=feedback or "(none — first attempt)",
+    )
     result = _llm_json(prompt)
 
-    # Calculate dynamic column count for accuracy
-    attr_count = len(state.get("core_mappings", {})) + len(state.get("custom_mappings", {}))
-    img_col_count = min(9, sum(1 for h in headers if any(k in h.lower() for k in ("image", "img", "photo"))))
-    total_cols = 6 + attr_count + img_col_count  # 6 fixed + attrs + images
-
-    # Override suggestions with accurate numbers
     suggestions = [
-        {
-            "type": "item",
-            "label": "Total products",
-            "value": str(row_count),
-            "reasoning": f"Found {row_count} data rows in the source file",
-        },
-        {
-            "type": "item",
-            "label": "Total columns in output",
-            "value": str(total_cols),
-            "reasoning": f"6 fixed columns + {attr_count} attributes + {img_col_count} image columns",
-        },
-        {
-            "type": "item",
-            "label": "Image columns detected",
-            "value": str(img_col_count),
-            "reasoning": "Up to 9 images per product supported",
-        },
+        {"type": "item", "label": "Total products", "value": str(row_count),
+         "reasoning": f"Found {row_count} data rows in the source file"},
+        {"type": "item", "label": "Total columns in output", "value": str(total_cols),
+         "reasoning": f"6 fixed columns + {attr_count} attributes + {img_col_count} image columns"},
+        {"type": "item", "label": "Image columns detected", "value": str(img_col_count),
+         "reasoning": "Up to 9 images per product supported"},
     ]
+    if preview_rows:
+        suggestions.insert(0, {
+            "type": "group",
+            "label": "Product Preview (first 3 rows)",
+            "items": [
+                {"type": "item", "column": k, "mapped_to": v, "confidence": 100,
+                 "reasoning": ""}
+                for pr in preview_rows for k, v in pr.items()
+            ][:12],
+        })
 
     state["products"] = PhaseOutput(
         explanation=result.get("explanation", ""),
@@ -875,8 +870,8 @@ def products_phase(state: InteractiveIngestionState) -> dict:
     )
 
     msg = (
-        f"📦 **Product Compilation**\n\n{result.get('explanation', '')}\n\n"
-        f"Ready to generate **{row_count} products** across **{total_cols} columns**.\n\n"
+        f"\ud83d\udce6 **Product Compilation**\n\n{result.get('explanation', '')}\n\n"
+        f"**{row_count}** products across **{total_cols}** columns ready.\n\n"
         f"Shall I proceed with generating the final PIM templates?"
     )
     state.setdefault("messages", []).append({"role": "assistant", "content": msg})
