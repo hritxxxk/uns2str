@@ -1359,6 +1359,29 @@ def products_phase(state: InteractiveIngestionState) -> dict:
         headers, all_data_rows, row_mappings, img_cols, state.get("core_mappings"),
     )
 
+    # ── Image URL validation ─────────────────────────────────
+    img_url_count = 0
+    img_broken = 0
+    img_samples = []
+    for pr in product_rows:
+        for ii in range(1, 10):
+            url = pr.get(f"image_{ii}", "")
+            if url and isinstance(url, str) and url.strip():
+                img_url_count += 1
+                url = url.strip()
+                if not url.startswith("http"):
+                    img_broken += 1
+                    if len(img_samples) < 3:
+                        img_samples.append(url)
+    img_warning = ""
+    if img_url_count > 0 and (img_broken / max(img_url_count, 1)) > 0.3:
+        pct = int(100 * img_broken / img_url_count)
+        img_warning = (
+            f"\n\n⚠️ **{pct}% of image links appear invalid** "
+            f"(e.g. '{img_samples[0] if img_samples else ''}'). "
+            f"Proceed anyway?"
+        )
+
     # Build a preview of the first 3 mapped products
     preview_rows = []
     for pr in product_rows[:3]:
@@ -1396,8 +1419,10 @@ def products_phase(state: InteractiveIngestionState) -> dict:
             ][:12],
         })
 
+    explanation = (result.get("explanation", "") + img_warning).strip()
+
     state["products"] = PhaseOutput(
-        explanation=result.get("explanation", ""),
+        explanation=explanation,
         reasoning=result.get("reasoning", ""),
         suggestions=suggestions,
         approved=False,
