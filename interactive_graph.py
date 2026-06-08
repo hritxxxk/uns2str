@@ -476,7 +476,13 @@ Return JSON:
                     user_feedback="",
                 )
                 state["profile_data"]["category_hierarchy"] = updated_paths
-                msg = f"📂 **Category Discovery**\n\n{explanation}\n\nFound **{len(updated_paths)}** paths."
+                if len(updated_paths) > 10:
+                    vis = "\n".join(f"- {p}" for p in updated_paths[:5])
+                    hid = "\n".join(f"- {p}" for p in updated_paths[5:])
+                    pd = vis + f"\n<details><summary>+{len(updated_paths)-5} more paths</summary>\n{hid}\n</details>"
+                else:
+                    pd = "\n".join(f"- {p}" for p in updated_paths)
+                msg = f"📂 **Category Discovery**\n\n{explanation}\n\n{pd}\n\nFound **{len(updated_paths)}** paths."
                 state.setdefault("messages", []).append({"role": "assistant", "content": msg})
                 logger.info(f"categories | bypass | paths={len(updated_paths)} | cols={decision['specified_columns']}")
                 return state
@@ -523,6 +529,12 @@ Return JSON:
         {"type": "item", "label": p, "confidence": 95, "reasoning": "Part of the product category hierarchy"}
         for p in paths
     ]
+    if len(paths) > 10:
+        visible = "\n".join(f"- {p}" for p in paths[:5])
+        hidden = "\n".join(f"- {p}" for p in paths[5:])
+        path_display = visible + f"\n<details><summary>+{len(paths)-5} more paths</summary>\n{hidden}\n</details>"
+    else:
+        path_display = "\n".join(f"- {p}" for p in paths)
 
     if not explanation:
         if paths:
@@ -545,7 +557,7 @@ Return JSON:
 
     msg = (
         f"📂 **Category Discovery**\n\n{explanation}"
-        + (f"\n\nFound **{len(paths)}** paths. Do these look right?" if paths else "")
+        + (f"\n\n{path_display}\n\nFound **{len(paths)}** paths. Do these look right?" if paths else "")
     )
     state.setdefault("messages", []).append({"role": "assistant", "content": msg})
     logger.info(f"categories | paths={len(paths)} | need_input={needs_input}")
