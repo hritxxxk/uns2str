@@ -920,6 +920,39 @@ Return JSON:
 """
 
 
+def parse_reference_feedback(feedback: str) -> dict:
+    prompt = f"""
+Analyze this user feedback about reference master values.
+Determine if they are approving, or if they want to override specific normalizations.
+
+If the user is asking about something NOT related to PIM/reference data (e.g. general chat, jokes, weather),
+set is_off_topic = true and provide a polite redirect.
+
+User feedback: "{feedback}"
+
+Return valid JSON:
+{{
+    "is_off_topic": false,
+    "is_approval": false,
+    "keep_values": {{"value_to_keep": "reason"}},
+    "override_normalizations": [{{"original": "MED", "keep_as": "MED"}}],
+    "redirect_message": "",
+    "explanation": ""
+}}
+
+Rules:
+- is_approval: True if user says yes/looks good/proceed/approve
+- keep_values: dict of values the user explicitly wants to keep as-is (e.g. {{"SML": "keep as SML"}})
+- override_normalizations: list of specific normalization overrides
+
+JSON:
+"""
+    try:
+        return _llm_json(prompt)
+    except Exception:
+        return {"is_off_topic": False, "is_approval": False, "keep_values": {}, "override_normalizations": [], "redirect_message": "", "explanation": ""}
+
+
 def references_phase(state: InteractiveIngestionState) -> dict:
     profile = state.get("profile_data", {})
     headers = profile.get("headers", [])
@@ -961,6 +994,43 @@ def references_phase(state: InteractiveIngestionState) -> dict:
             "normalizations": [],
             "confidence": 100,
         })
+
+    # ── Intent parsing bypass ────────────────────────────────
+    if feedback:
+        decision = parse_reference_feedback(feedback)
+        if decision.get("is_off_topic"):
+            redirect = decision.get("redirect_message", "Let's keep the focus on your reference data.")
+            state.setdefault("messages", []).append({"role": "assistant", "content": redirect})
+            logger.info("references | off-topic | redirect sent")
+            return state
+        if decision.get("is_approval"):
+            state["references"] = PhaseOutput(
+                explanation="Reference masters approved.",
+                reasoning="User confirmed reference values.",
+                suggestions=suggestions,
+                approved=True,
+                user_feedback="",
+            )
+            state.setdefault("messages", []).append({"role": "assistant", "content": "✅ Reference masters approved. Moving on..."})
+            logger.info("references | bypass | approved")
+            return state
+        if decision.get("keep_values"):
+            keep = decision.get("keep_values", {})
+            for s in suggestions:
+                s["messy_values"] = [v for v in s.get("messy_values", []) if v not in keep]
+                s["normalizations"] = [n for n in s.get("normalizations", [])
+                                       if not (isinstance(n, dict) and n.get("original") in keep)
+                                       and not (isinstance(n, str) and n.split(" → ")[0].strip() in keep)]
+            state["references"] = PhaseOutput(
+                explanation=decision.get("explanation", "Applied your reference overrides."),
+                reasoning="Bypass: user-specified normalization overrides.",
+                suggestions=suggestions,
+                approved=True,
+                user_feedback="",
+            )
+            state.setdefault("messages", []).append({"role": "assistant", "content": f"Applied your overrides. Moving on..."})
+            logger.info("references | bypass | keep overrides applied")
+            return state
 
     # Use LLM to add educational explanation + detect messy values
     refs_summary = "\n".join(
