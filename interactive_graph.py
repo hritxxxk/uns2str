@@ -536,6 +536,37 @@ def _read_metadata_rows(state) -> str:
     return "(no metadata rows found)"
 
 
+def parse_attribute_feedback(feedback: str) -> dict:
+    prompt = f"""
+Analyze this user feedback about PIM attribute mappings.
+Determine if they are asking to add, remove, or change column-to-attribute mappings.
+
+User feedback: "{feedback}"
+
+Return valid JSON:
+{{
+    "has_override": bool,
+    "add_mappings": [{{"column": "col", "mapped_to": "attr", "type": "Textbox", "data_type": "varchar"}}],
+    "remove_columns": ["col1", "col2"],
+    "remap": [{{"column": "old", "new_target": "new"}}],
+    "explanation": "string"
+}}
+
+Rules:
+- add_mappings: when user says "map X to Y" and X is a source column
+- remove_columns: when user says "remove/drop/skip X"
+- remap: when user says "change X to map to Y instead"
+- type can be: Textbox, Dropdown, RichText, Textarea, MultiSelect, Date
+- data_type can be: varchar, int, float, boolean, date
+
+JSON:
+"""
+    try:
+        return _llm_json(prompt)
+    except Exception:
+        return {"has_override": False, "add_mappings": [], "remove_columns": [], "remap": [], "explanation": ""}
+
+
 def attributes_phase(state: InteractiveIngestionState) -> dict:
     profile = state.get("profile_data", {})
     headers = profile.get("headers", [])
@@ -556,6 +587,59 @@ def attributes_phase(state: InteractiveIngestionState) -> dict:
     cached = load_cached_mapping(fp)
     if cached and not feedback and cycle == 0:
         return _apply_cached_mappings(state, cached, headers, fp)
+
+    # ── Intent parsing bypass ────────────────────────────────
+    if feedback:
+        decision = parse_attribute_feedback(feedback)
+        if decision.get("has_override"):
+            core = dict(state.get("core_mappings", {}))
+            custom = dict(state.get("custom_mappings", {}))
+            for col in decision.get("remove_columns", []):
+                core = {k: v for k, v in core.items() if v != col}
+                custom.pop(col, None)
+            for r in decision.get("remap", []):
+                col = r.get("column", "")
+                new_tgt = r.get("new_target", "")
+                for k, v in list(core.items()):
+                    if v == col:
+                        core[new_tgt] = core.pop(k)
+                        break
+                if col in custom:
+                    custom[new_tgt] = custom.pop(col)
+            for m in decision.get("add_mappings", []):
+                col = m.get("column", "")
+                tgt = m.get("mapped_to", col)
+                if tgt in ("sku_name", "code", "mrp"):
+                    core[tgt] = col
+                elif col and col in headers:
+                    custom[col] = tgt
+            state["core_mappings"] = core
+            state["custom_mappings"] = custom
+            all_items = []
+            for tgt, col in core.items():
+                all_items.append({"column": col, "mapped_to": tgt, "attribute_type": "Textbox", "attribute_data_type": "varchar", "confidence": 100})
+            for col, tgt in custom.items():
+                all_items.append({"column": col, "mapped_to": tgt, "attribute_type": "Textbox", "attribute_data_type": "varchar", "confidence": 100})
+            state["attributes"] = PhaseOutput(
+                explanation=decision.get("explanation", "Applied your changes."),
+                reasoning="Bypass: user-specified mapping overrides.",
+                suggestions=[
+                    {"type": "group", "label": "High-Confidence Core Mappings", "items": [
+                        {"type": "item", "column": col, "mapped_to": tgt, "attribute_type": "Textbox", "attribute_data_type": "varchar", "confidence": 100, "reasoning": "User override"}
+                        for tgt, col in core.items()
+                    ]},
+                    {"type": "group", "label": "Custom Dynamic Attributes", "items": [
+                        {"type": "item", "column": col, "mapped_to": tgt, "attribute_type": "Textbox", "attribute_data_type": "varchar", "confidence": 100, "reasoning": "User override"}
+                        for col, tgt in custom.items()
+                    ]},
+                ],
+                approved=True,
+                user_feedback="",
+            )
+            msg = f"📋 **Attribute Mapping**\n\n{decision.get('explanation', 'Applied your changes.')}"
+            state.setdefault("messages", []).append({"role": "assistant", "content": msg})
+            logger.info(f"attributes | bypass | core={len(core)} custom={len(custom)}")
+            return state
 
     # ── Step 1: Column screening (adaptive) ───────────────────
     max_sample = min(len(all_data_rows), 500)
@@ -930,6 +1014,34 @@ Return JSON:
 """
 
 
+def parse_product_feedback(feedback: str) -> dict:
+    prompt = f"""
+Analyze this user feedback about product compilation.
+Determine if they want to exclude any columns from the output, or if they're approving.
+
+User feedback: "{feedback}"
+
+Return valid JSON:
+{{
+    "has_override": bool,
+    "exclude_columns": ["col1", "col2"],
+    "is_approval": bool,
+    "explanation": "string"
+}}
+
+Rules:
+- has_override: True if user wants to exclude/remove/drop specific columns
+- exclude_columns: list of column names to exclude (based on source column names or attribute names)
+- is_approval: True if user is saying yes/looks good/proceed/go ahead
+
+JSON:
+"""
+    try:
+        return _llm_json(prompt)
+    except Exception:
+        return {"has_override": False, "exclude_columns": [], "is_approval": False, "explanation": ""}
+
+
 def products_phase(state: InteractiveIngestionState) -> dict:
     profile = state.get("profile_data", {})
     headers = profile.get("headers", [])
@@ -954,6 +1066,28 @@ def products_phase(state: InteractiveIngestionState) -> dict:
             row_mappings.append({"source_column": col, "target_attribute": target})
     for col, preserved in state.get("custom_mappings", {}).items():
         row_mappings.append({"source_column": col, "target_attribute": preserved})
+
+    # ── Intent parsing bypass ────────────────────────────────
+    if feedback:
+        decision = parse_product_feedback(feedback)
+        if decision.get("is_approval"):
+            state["products"] = PhaseOutput(
+                explanation="Proceeding with product compilation.",
+                reasoning="User approved.",
+                suggestions=[],
+                approved=True,
+                user_feedback="",
+            )
+            state.setdefault("messages", []).append({"role": "assistant", "content": "Generating final PIM templates..."})
+            logger.info("products | bypass | approved")
+            return state
+        if decision.get("has_override"):
+            excluded = set(decision.get("exclude_columns", []))
+            filtered_mappings = [m for m in row_mappings
+                                 if m.get("source_column") not in excluded
+                                 and m.get("target_attribute") not in excluded]
+            if filtered_mappings:
+                row_mappings = filtered_mappings
 
     img_cols = extract_image_columns(headers, row_mappings)
     product_rows = build_product_rows(
