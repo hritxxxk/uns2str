@@ -1526,6 +1526,7 @@ def render_interactive(state: InteractiveIngestionState) -> dict:
     })
 
     state["generated_files"] = list(files.values())
+    state["product_rows"] = product_rows
     state["current_phase"] = "complete"
 
     msg = (

@@ -1,0 +1,16 @@
+{
+  "target_platform": "Myntra",
+  "file_format": "xlsx",
+  "mappings": {
+    "Seller Style ID": "code",
+    "Style Name": "sku_name",
+    "Product Description": "description",
+    "MRP": "mrp",
+    "Front Image": "image_1",
+    "Back Image": "image_2"
+  },
+  "static_defaults": {
+    "GSTIN": "27AAAAA1111A1Z1",
+    "Country of Origin": "India"
+  }
+}

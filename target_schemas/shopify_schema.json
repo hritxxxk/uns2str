@@ -1,0 +1,17 @@
+{
+  "target_platform": "Shopify",
+  "file_format": "csv",
+  "mappings": {
+    "Handle": "code",
+    "Title": "sku_name",
+    "Body (HTML)": "description",
+    "Variant Price": "mrp",
+    "Variant SKU": "code",
+    "Image Src": "image_1"
+  },
+  "static_defaults": {
+    "Variant Inventory Policy": "deny",
+    "Variant Fulfillment Service": "manual",
+    "Published": "true"
+  }
+}

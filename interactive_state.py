@@ -74,5 +74,6 @@ class InteractiveIngestionState(TypedDict):
     core_mappings: dict[str, str]
     custom_mappings: dict[str, str]
     mapping_confidence: dict[str, int]
+    product_rows: list[dict]
     generated_files: list[str]
     jwt_token: str

@@ -642,6 +642,7 @@ def _build_interactive_initial(file_path: str, sheet_name: str | None, jwt: str)
         "products": PhaseOutput(explanation="", reasoning="", suggestions=[], approved=False, user_feedback=""),
         "all_sheets": [],
         "sheet_merge": {},
+        "product_rows": [],
         "core_mappings": {},
     }
 
@@ -944,6 +945,11 @@ async def interactive_status(req: StatusRequest):
     }
 
 
+class ExportRequest(BaseModel):
+    thread_id: str
+    target_platform: str
+
+
 class MergeApplyRequest(BaseModel):
     file_path: str
     merges: list[dict]
@@ -964,6 +970,60 @@ async def merge_apply(req: MergeApplyRequest):
     from merger import apply_golden_merge
     result_path = apply_golden_merge(req.file_path, req.merges, req.headers)
     return {"path": result_path, "merged_count": len(req.merges)}
+
+
+@app.post("/interactive/export")
+async def interactive_export(req: ExportRequest):
+    """Export completed session data to a target marketplace format.
+
+    Body: {
+        "thread_id": "...",
+        "target_platform": "Shopify"
+    }
+    Returns {"status": "success", "file_path": "output/...", "row_count": N}
+    """
+    from interactive_graph import interactive_graph
+    from meta_exporter import generate_target_export
+
+    config = {"configurable": {"thread_id": req.thread_id}}
+    try:
+        state = interactive_graph.get_state(config)
+    except Exception:
+        raise HTTPException(status_code=404, detail=f"Thread '{req.thread_id}' not found")
+
+    vals = state.values
+    if vals.get("current_phase") != "complete":
+        raise HTTPException(status_code=400, detail="Onboarding is not yet complete. Finish all 4 phases first.")
+
+    pim_products = vals.get("product_rows", [])
+    if not pim_products:
+        raise HTTPException(status_code=400, detail="No product data found in this session.")
+
+    schema_path = f"target_schemas/{req.target_platform.lower()}_schema.json"
+    if not os.path.exists(schema_path):
+        available = [f.replace("_schema.json", "") for f in os.listdir("target_schemas") if f.endswith("_schema.json")]
+        raise HTTPException(
+            status_code=404,
+            detail=f"Schema for '{req.target_platform}' not found. Available: {available}",
+        )
+
+    # Determine file extension from schema
+    with open(schema_path) as _sf:
+        _schema_data = json.load(_sf)
+    _ext = "csv" if _schema_data.get("file_format") == "csv" else "xlsx"
+    output_filename = f"{req.thread_id}_{req.target_platform.lower()}.{_ext}"
+    output_path = os.path.join("output", output_filename)
+
+    generate_target_export(pim_products, schema_path, output_path)
+
+    logger.info(f"export | thread={req.thread_id} | platform={req.target_platform} | rows={len(pim_products)}")
+
+    return {
+        "status": "success",
+        "file_path": output_path,
+        "filename": output_filename,
+        "row_count": len(pim_products),
+    }
 
 
 # ─── Run (for development) ──────────────────────────────────────
