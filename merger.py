@@ -176,14 +176,14 @@ def _row_quality(row: list[str], skip_indices: set = frozenset()) -> int:
     return sum(1 for i, val in enumerate(row) if val.strip() and i not in skip_indices)
 
 
-def deduplicate_fuzzy(unified_path: str, threshold: float = 0.92) -> str:
-    """Fuzzy-deduplicate near-duplicate codes using Jaro-Winkler similarity.
+def deduplicate_fuzzy(unified_path: str, threshold: float = 0.92) -> dict:
+    """Detect near-duplicate codes using Jaro-Winkler similarity.
 
-    Near-duplicate pairs are merged into a single "Golden Record" row:
-    the row with the most non-empty fields is kept, combining fields
-    from both rows (duplicate row fills missing fields in the golden record).
+    Does NOT auto-merge. Returns a dict with:
+      - candidates: list of {code_a, code_b, similarity, row_a, row_b}
+      - exact_dedup_count: number of exact duplicates removed during merge
 
-    Returns the same path.
+    Caller must present candidates to the user for approval before merging.
     """
     import tempfile, shutil
 
@@ -194,53 +194,75 @@ def deduplicate_fuzzy(unified_path: str, threshold: float = 0.92) -> str:
 
     code_idx = headers.index("code") if "code" in headers else 0
     code_idx = max(code_idx, 0)
-    kept = []
-    groups = []  # list of {"code": str, "row": list, "quality": int}
+    candidates = []
+    seen = {}  # code → row index in kept
 
-    for row in rows:
+    for i, row in enumerate(rows):
         code = row[code_idx].strip().upper() if code_idx < len(row) else ""
         if not code:
-            kept.append(row)
             continue
 
-        qty = _row_quality(row, {code_idx})
-        matched = None
-
-        for group in groups:
-            if _jaro_winkler(code, group["code"]) >= threshold:
-                matched = group
+        for existing_code, existing_idx in list(seen.items()):
+            sim = _jaro_winkler(code, existing_code)
+            if sim >= threshold and code != existing_code:
+                candidates.append({
+                    "code_a": existing_code,
+                    "code_b": code,
+                    "similarity": round(sim, 3),
+                    "row_a_index": existing_idx,
+                    "row_b_index": i,
+                })
                 break
 
-        if matched is None:
-            groups.append({"code": code, "row": row, "quality": qty})
-        elif qty > matched["quality"]:
-            # New row has better quality — merge into golden record
-            for i in range(len(row)):
-                if i == code_idx:
-                    continue
-                if row[i].strip() and (not matched["row"][i].strip() or i >= len(matched["row"])):
-                    if i < len(matched["row"]):
-                        matched["row"][i] = row[i]
-            matched["quality"] = _row_quality(matched["row"], {code_idx})
-        else:
-            # Existing golden record has better quality — fill missing fields
-            for i in range(len(matched["row"])):
-                if i == code_idx:
-                    continue
-                if not matched["row"][i].strip() and i < len(row) and row[i].strip():
-                    matched["row"][i] = row[i]
-            matched["quality"] = _row_quality(matched["row"], {code_idx})
+        seen[code] = i
 
-    deduped_count = len(rows) - len(groups) - (len(rows) - len([r for r in rows if not r[code_idx].strip()]))
-    kept = [g["row"] for g in groups] + [r for r in rows if not r[code_idx].strip()]
+    if candidates:
+        logger.info(f"fuzzy dedup: found {len(candidates)} potential merge candidate(s)")
+        for c in candidates:
+            logger.info(f"  {c['code_a']} <-> {c['code_b']} (sim={c['similarity']})")
 
-    if len(kept) < len(rows):
-        tmp_path = unified_path + ".tmp"
-        with open(tmp_path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow(headers)
-            writer.writerows(kept)
-        shutil.move(tmp_path, unified_path)
-        logger.info(f"fuzzy dedup: {len(rows)} -> {len(kept)} rows | jaro-winkler threshold={threshold}")
+    return {
+        "candidates": candidates,
+        "headers": headers,
+    }
+
+
+def apply_golden_merge(unified_path: str, merge_pairs: list[dict], headers: list[str]) -> str:
+    """Apply approved golden record merges to the unified CSV.
+
+    merge_pairs: list of {keep_idx, merge_idx} — pairs to merge.
+    For each pair, row at merge_idx is merged into row at keep_idx
+    (missing fields in keep_idx are filled from merge_idx),
+    then row at merge_idx is removed.
+
+    Returns the same path.
+    """
+    import tempfile, shutil
+
+    with open(unified_path, "r", newline="", encoding="utf-8") as f:
+        reader = csv.reader(f)
+        reader_headers = next(reader)
+        rows = list(reader)
+
+    removed = set()
+    for pair in merge_pairs:
+        ki = pair["keep_idx"]
+        mi = pair["merge_idx"]
+        if ki in removed or mi in removed:
+            continue
+        for col in range(len(rows[ki])):
+            if not rows[ki][col].strip() and col < len(rows[mi]) and rows[mi][col].strip():
+                rows[ki][col] = rows[mi][col]
+        removed.add(mi)
+
+    kept = [rows[i] for i in range(len(rows)) if i not in removed]
+
+    tmp_path = unified_path + ".tmp"
+    with open(tmp_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(headers)
+        writer.writerows(kept)
+    shutil.move(tmp_path, unified_path)
+    logger.info(f"golden merge: {len(rows)} -> {len(kept)} rows ({len(removed)} merged)")
 
     return unified_path

@@ -75,17 +75,34 @@ async def upload_file(file: UploadFile = File(...)):
             master_name = f"{uuid.uuid4().hex}_master.csv"
             master_path = os.path.join(UPLOAD_DIR, master_name)
             merge_sources(recipe, temp_dir, master_path)
-            deduplicate_fuzzy(master_path)
+            dedup_result = deduplicate_fuzzy(master_path)
 
             cleanup_temp(temp_dir)
             logger.info(f"upload | zip processed | master={master_path}")
-            return {
+
+            response = {
                 "path": master_path,
                 "filename": master_name,
                 "original_zip": safe_name,
                 "files_found": list(profiles.keys()),
                 "summary": recipe.get("summary", ""),
             }
+
+            candidates = dedup_result.get("candidates", [])
+            if candidates:
+                response["merge_candidates"] = [
+                    {
+                        "code_a": c["code_a"],
+                        "code_b": c["code_b"],
+                        "similarity": c["similarity"],
+                        "keep_idx": c["row_a_index"],
+                        "merge_idx": c["row_b_index"],
+                    }
+                    for c in candidates
+                ]
+                response["merge_headers"] = dedup_result.get("headers", [])
+
+            return response
         except Exception as exc:
             logger.warning(f"upload | zip processing failed: {exc}")
             import traceback
@@ -925,6 +942,28 @@ async def interactive_status(req: StatusRequest):
         "has_output_files": bool(files),
         "generated_files": files,
     }
+
+
+class MergeApplyRequest(BaseModel):
+    file_path: str
+    merges: list[dict]
+    headers: list[str]
+
+
+@app.post("/merge/apply")
+async def merge_apply(req: MergeApplyRequest):
+    """Apply approved golden record merges to a unified master CSV.
+
+    Body: {
+        "file_path": "uploads/master.csv",
+        "merges": [{"keep_idx": 0, "merge_idx": 1}],
+        "headers": ["code", "sku_name", "mrp"]
+    }
+    Returns {"path": ..., "merged_count": N}
+    """
+    from merger import apply_golden_merge
+    result_path = apply_golden_merge(req.file_path, req.merges, req.headers)
+    return {"path": result_path, "merged_count": len(req.merges)}
 
 
 # ─── Run (for development) ──────────────────────────────────────
