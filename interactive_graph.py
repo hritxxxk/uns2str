@@ -360,8 +360,14 @@ File: {filename}
 Column profiles (unique counts + samples):
 {profiles}
 
-Sample data (first 3 rows):
+Sample data (first {sample_count} rows):
 {samples}
+
+Metadata rows found above the header (constraints, descriptions, types):
+{metadata_context}
+
+Entity-Attribute-Value format detection:
+{eav_info}
 
 Historical corrections for similar columns:
 {few_shots}
@@ -372,13 +378,19 @@ The user's feedback from the previous attempt (if any):
 Previous validation errors (fix these):
 {validation_errors_text}
 
-Map each source column to a PIM attribute. Include BOTH `attribute_type` AND `attribute_data_type` for every mapping. Group your results into three buckets:
+Map each source column to a PIM attribute. Attributes may be:
+- In columns (each column is one attribute — standard format)
+- In rows (EAV format — one column has attribute names, another has values)
+- Described in metadata rows above the header
+
+If the data is in EAV format, suggest pivoting the attribute names into columns.
+
+Include BOTH `attribute_type` AND `attribute_data_type` for every mapping. Group your results into three buckets:
 
 1. **High-Confidence Core Mappings** — system-critical fields (sku_name, code, mrp)
    that are clearly identified. Use simple language.
 
-2. **Custom Dynamic Attributes** — proprietary columns (e.g. "Heel Height",
-   "Upper Material") that should be preserved as-is with their source name.
+2. **Custom Dynamic Attributes** — proprietary columns that should be preserved.
 
 3. **Low-Confidence / Ambiguous Fields** — columns where you're < 80% sure.
    Explain WHY you're unsure and offer alternatives.
@@ -400,10 +412,17 @@ attribute_data_type rules:
 - Dates → date
 - Everything else → varchar
 
+Also report your sampling confidence. If you don't have enough rows to be confident
+(e.g. too few unique values per column, suspicious patterns), set needs_more_samples
+to true and I'll send more data.
+
 Return JSON:
 {{
+  "sampling_confidence": 90,
+  "needs_more_samples": false,
   "explanation": "A plain-English summary of what you found.",
   "reasoning": "Technical breakdown for users who want details.",
+  "detected_format": "columns",
   "suggestions": [
     {{
       "type": "group",
@@ -443,7 +462,53 @@ Return JSON:
     }}
   ]
 }}
+
+If sampling_confidence < 70 and needs_more_samples is true, I'll send more rows.
 """
+
+
+def _detect_eav_format(headers: list, rows: list) -> dict:
+    if not rows or len(rows) < 3 or len(headers) < 2:
+        return {"is_eav": False, "attr_column": None, "val_column": None}
+    col_value_counts = {}
+    for ci in range(min(3, len(headers))):
+        vals = [str(r[ci]).strip() for r in rows[:50] if ci < len(r) and r[ci] is not None and str(r[ci]).strip()]
+        unique = set(vals)
+        if len(vals) >= 5 and 3 <= len(unique) <= 100 and (len(unique) / len(vals)) < 0.7:
+            col_value_counts[ci] = len(unique)
+    if not col_value_counts:
+        return {"is_eav": False, "attr_column": None, "val_column": None}
+    likely_attr_col = max(col_value_counts, key=col_value_counts.get)
+    likely_val_col = 1 if likely_attr_col == 0 else 0
+    attr_samples = list(set(str(r[likely_attr_col]).strip() for r in rows[:50] if likely_attr_col < len(r) and r[likely_attr_col] is not None))
+    return {
+        "is_eav": True,
+        "attr_column": headers[likely_attr_col] if likely_attr_col < len(headers) else "",
+        "val_column": headers[likely_val_col] if likely_val_col < len(headers) else "",
+        "sample_attributes": sorted(attr_samples)[:15],
+    }
+
+
+def _read_metadata_rows(state) -> str:
+    profile = state.get("profile_data", {})
+    hr = profile.get("header_row", 0)
+    dr = profile.get("data_start_row", hr + 1)
+    if dr <= hr + 1:
+        return "(no metadata rows — headers are immediately above data)"
+    headers = profile.get("headers", [])
+    gen = read_file(state["file_path"], state.get("sheet_name"))
+    all_rows = list(gen)
+    metadata_rows = []
+    for mr in range(hr + 1, min(dr, len(all_rows))):
+        row_data = {}
+        for ci, h in enumerate(headers):
+            if ci < len(all_rows[mr]) and all_rows[mr][ci] is not None and str(all_rows[mr][ci]).strip():
+                row_data[h] = str(all_rows[mr][ci]).strip()[:80]
+        if row_data:
+            metadata_rows.append(row_data)
+    if metadata_rows:
+        return json.dumps(metadata_rows[:5], indent=2)
+    return "(no metadata rows found)"
 
 
 def attributes_phase(state: InteractiveIngestionState) -> dict:
@@ -462,72 +527,99 @@ def attributes_phase(state: InteractiveIngestionState) -> dict:
             break
     all_data_rows = list(gen)
 
-    sample_rows = all_data_rows[:5]
-    samples = []
-    for row in sample_rows:
-        s = {}
-        for i, h in enumerate(headers):
-            if i < len(row) and row[i] is not None and str(row[i]).strip():
-                s[h] = str(row[i]).strip()[:80]
-        samples.append(s)
-
-    cols = profile_columns.invoke({"headers": headers, "rows": all_data_rows})
-    col_profiles = []
-    for c in cols[:40]:
-        col_profiles.append({
-            "name": c["name"],
-            "unique": c["unique"],
-            "non_null": c["non_null"],
-            "sample": c["sample"][:3],
-        })
-
     fp = fingerprint_headers(headers)
     cached = load_cached_mapping(fp)
     if cached and not feedback and cycle == 0:
         return _apply_cached_mappings(state, cached, headers, fp)
 
-    few_shots = []
-    seen_targets = set()
-    for h in headers[:10]:
-        vals = []
-        for row in all_data_rows:
-            idx = headers.index(h)
-            if idx < len(row) and row[idx] is not None and str(row[idx]).strip():
-                vals.append(str(row[idx]).strip()[:40])
-        if not vals:
-            continue
-        matches = fetch_similar_examples(h, vals, k=2)
-        for m in matches:
-            tgt = m["target_attribute"]
-            if tgt and tgt not in seen_targets:
-                few_shots.append(m)
-                seen_targets.add(tgt)
-                if len(few_shots) >= 5:
-                    break
-        if len(few_shots) >= 5:
-            break
+    # Adaptive sampling: start with 50 rows, ask LLM if it needs more
+    max_sample = min(len(all_data_rows), 500)
+    sample_size = min(50, max_sample)
+    sampling_round = 0
+    max_sampling_rounds = 3
+    needs_more = True
+    result = {}
 
-    few_shots_text = "\n".join(
-        f'- "{fs["column_name"]}" → {fs["target_attribute"]} ({fs["attribute_type"]}, {fs["attribute_data_type"]}, mandatory={str(fs["mandatory"]).lower()})'
-        for fs in few_shots
-    ) if few_shots else "(no historical corrections available)"
+    while needs_more and sampling_round < max_sampling_rounds and sample_size <= max_sample:
+        sampling_round += 1
+        current_rows = all_data_rows[:sample_size]
 
-    previous_errors = state.get("attributes", {}).get("validation_errors", [])
-    validation_errors_text = "\n".join(
-        f'- {e["field"]}: {e["issue"]}'
-        for e in previous_errors
-    ) if previous_errors else "(none)"
+        sample_rows = current_rows[:5]
+        samples = []
+        for row in sample_rows:
+            s = {}
+            for i, h in enumerate(headers):
+                if i < len(row) and row[i] is not None and str(row[i]).strip():
+                    s[h] = str(row[i]).strip()[:80]
+            samples.append(s)
 
-    prompt = ATTRIBUTES_PROMPT.format(
-        filename=os.path.basename(state["file_path"]),
-        profiles=json.dumps(col_profiles, indent=2),
-        samples=json.dumps(samples, indent=2),
-        few_shots=few_shots_text,
-        feedback=feedback or "(none — first attempt)",
-        validation_errors_text=validation_errors_text,
-    )
+        cols = profile_columns.invoke({"headers": headers, "rows": current_rows})
+        col_profiles = []
+        for c in cols[:40]:
+            col_profiles.append({
+                "name": c["name"],
+                "unique": c["unique"],
+                "non_null": c["non_null"],
+                "sample": c["sample"][:3],
+            })
 
-    result = _llm_json(prompt)
+        # EAV detection
+        eav_info = _detect_eav_format(headers, current_rows)
+        eav_text = json.dumps(eav_info, indent=2) if eav_info["is_eav"] else "(data appears to be in standard columnar format)"
+
+        # Metadata scanning
+        metadata_context = _read_metadata_rows(state)
+
+        few_shots = []
+        seen_targets = set()
+        for h in headers[:10]:
+            vals = []
+            for row in current_rows:
+                idx = headers.index(h)
+                if idx < len(row) and row[idx] is not None and str(row[idx]).strip():
+                    vals.append(str(row[idx]).strip()[:40])
+            if not vals:
+                continue
+            matches = fetch_similar_examples(h, vals, k=2)
+            for m in matches:
+                tgt = m["target_attribute"]
+                if tgt and tgt not in seen_targets:
+                    few_shots.append(m)
+                    seen_targets.add(tgt)
+                    if len(few_shots) >= 5:
+                        break
+            if len(few_shots) >= 5:
+                break
+
+        few_shots_text = "\n".join(
+            f'- "{fs["column_name"]}" → {fs["target_attribute"]} ({fs["attribute_type"]}, {fs["attribute_data_type"]}, mandatory={str(fs["mandatory"]).lower()})'
+            for fs in few_shots
+        ) if few_shots else "(no historical corrections available)"
+
+        previous_errors = state.get("attributes", {}).get("validation_errors", [])
+        validation_errors_text = "\n".join(
+            f'- {e["field"]}: {e["issue"]}'
+            for e in previous_errors
+        ) if previous_errors else "(none)"
+
+        prompt = ATTRIBUTES_PROMPT.format(
+            filename=os.path.basename(state["file_path"]),
+            profiles=json.dumps(col_profiles, indent=2),
+            samples=json.dumps(samples, indent=2),
+            sample_count=sample_size,
+            metadata_context=metadata_context,
+            eav_info=eav_text,
+            few_shots=few_shots_text,
+            feedback=feedback or "(none — first attempt)",
+            validation_errors_text=validation_errors_text,
+        )
+
+        result = _llm_json(prompt)
+        needs_more = result.get("needs_more_samples", False) and result.get("sampling_confidence", 100) < 70
+
+        if needs_more:
+            sample_size = min(sample_size * 2, max_sample)
+            logger.info(f"attributes | sampling round {sampling_round}: increased to {sample_size} rows")
 
     all_items = []
     for group in result.get("suggestions", []):
