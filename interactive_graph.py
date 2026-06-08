@@ -351,14 +351,14 @@ def categories_phase(state: InteractiveIngestionState) -> dict:
 
 # ─── Attributes Phase Node ───────────────────────────────────────
 
-ATTRIBUTES_PROMPT = """You are a VinAI PIM onboarding assistant. The user has confirmed their category hierarchy.
+SCREENING_PROMPT = """You are a VinAI PIM onboarding assistant screening a data file for attribute discovery.
 
-Current phase: Attribute Mapping
+Current phase: Attribute Screening (Step 1 of 2)
 
 File: {filename}
 
-Column profiles (unique counts + samples):
-{profiles}
+Column names:
+{column_names}
 
 Sample data (first {sample_count} rows):
 {samples}
@@ -369,6 +369,38 @@ Metadata rows found above the header (constraints, descriptions, types):
 Entity-Attribute-Value format detection:
 {eav_info}
 
+Your job is to screen the columns and answer:
+1. What format is the data? ("columns" = standard, "eav" = attribute names in rows, "hybrid", "unknown")
+2. Which columns are actual product attributes vs metadata/internal fields vs noise?
+3. Exclude columns that are: internal IDs, audit timestamps, system flags, empty/constant columns, purely descriptive metadata
+4. Report your sampling confidence. If 50 rows isn't enough variety to decide, set needs_more_samples to true.
+
+Return JSON:
+{{
+  "format_detected": "columns",
+  "attribute_columns": ["Product Name", "Brand", "Price", ...],
+  "excluded_columns": {{"Internal Code": "internal ID — not a product attribute", "Created At": "system timestamp"}},
+  "sampling_confidence": 90,
+  "needs_more_samples": false,
+  "reasoning": "Brief explanation of format and screening decisions."
+}}
+"""
+
+
+MAPPING_PROMPT = """You are a VinAI PIM onboarding assistant mapping screened columns to PIM attributes.
+
+Current phase: Attribute Mapping (Step 2 of 2)
+
+These columns have been confirmed as product attributes. Map each one.
+
+File: {filename}
+
+Column profiles (unique counts + samples) for screened attributes:
+{profiles}
+
+Sample data (first rows):
+{samples}
+
 Historical corrections for similar columns:
 {few_shots}
 
@@ -378,22 +410,12 @@ The user's feedback from the previous attempt (if any):
 Previous validation errors (fix these):
 {validation_errors_text}
 
-Map each source column to a PIM attribute. Attributes may be:
-- In columns (each column is one attribute — standard format)
-- In rows (EAV format — one column has attribute names, another has values)
-- Described in metadata rows above the header
-
-If the data is in EAV format, suggest pivoting the attribute names into columns.
-
 Include BOTH `attribute_type` AND `attribute_data_type` for every mapping. Group your results into three buckets:
 
 1. **High-Confidence Core Mappings** — system-critical fields (sku_name, code, mrp)
-   that are clearly identified. Use simple language.
-
+   that are clearly identified.
 2. **Custom Dynamic Attributes** — proprietary columns that should be preserved.
-
 3. **Low-Confidence / Ambiguous Fields** — columns where you're < 80% sure.
-   Explain WHY you're unsure and offer alternatives.
 
 PIM defaults (map TO these, don't recreate): sku_name, code, mrp
 
@@ -402,7 +424,7 @@ attribute_type rules:
 - Description/notes → RichText (length=65536)
 - Codes, names, numbers, prices → Textbox
 - Multi-value tags/features → MultiSelect (constraint=true)
-- Multi-value predefined choices (e.g. multiple categories) → MultiSelectDropdown (constraint=true)
+- Multi-value predefined choices → MultiSelectDropdown (constraint=true)
 - Text with predefined options + free-text entry → MultiTextBox (constraint=true)
 - Date fields → Date
 - Image URLs → Textbox, length=2048
@@ -414,58 +436,20 @@ attribute_data_type rules:
 - Dates → date
 - Everything else → varchar
 
-Also report your sampling confidence. If you don't have enough rows to be confident
-(e.g. too few unique values per column, suspicious patterns), set needs_more_samples
-to true and I'll send more data.
-
 Return JSON:
 {{
-  "sampling_confidence": 90,
-  "needs_more_samples": false,
-  "explanation": "A plain-English summary of what you found.",
-  "reasoning": "Technical breakdown for users who want details.",
-  "detected_format": "columns",
+  "explanation": "A plain-English summary of the mappings.",
+  "reasoning": "Technical details.",
   "suggestions": [
     {{
       "type": "group",
       "label": "High-Confidence Core Mappings",
-      "items": [
-        {{
-          "type": "item",
-          "column": "Product Name",
-          "mapped_to": "sku_name",
-          "attribute_type": "Textbox",
-          "attribute_data_type": "varchar",
-          "confidence": 100,
-          "reasoning": "Standard product title field"
-        }}
-      ]
+      "items": [{{"type": "item", "column": "Product Name", "mapped_to": "sku_name", "attribute_type": "Textbox", "attribute_data_type": "varchar", "confidence": 100, "reasoning": "..."}}]
     }},
-    {{
-      "type": "group",
-      "label": "Custom Dynamic Attributes",
-      "items": [...]
-    }},
-    {{
-      "type": "group",
-      "label": "Low-Confidence / Needs Review",
-      "items": [
-        {{
-          "type": "item",
-          "column": "Manufacturer Tag",
-          "mapped_to": null,
-          "attribute_type": "Textbox",
-          "attribute_data_type": "varchar",
-          "confidence": 55,
-          "reasoning": "Could be brand, manufacturer, or internal code",
-          "options": ["brand", "manufacturer", "skip"]
-        }}
-      ]
-    }}
+    {{"type": "group", "label": "Custom Dynamic Attributes", "items": [...]}},
+    {{"type": "group", "label": "Low-Confidence / Needs Review", "items": [...]}}
   ]
 }}
-
-If sampling_confidence < 70 and needs_more_samples is true, I'll send more rows.
 """
 
 
@@ -534,13 +518,13 @@ def attributes_phase(state: InteractiveIngestionState) -> dict:
     if cached and not feedback and cycle == 0:
         return _apply_cached_mappings(state, cached, headers, fp)
 
-    # Adaptive sampling: start with 50 rows, ask LLM if it needs more
+    # ── Step 1: Column screening (adaptive) ───────────────────
     max_sample = min(len(all_data_rows), 500)
     sample_size = min(50, max_sample)
     sampling_round = 0
     max_sampling_rounds = 3
     needs_more = True
-    result = {}
+    attr_columns = []
 
     while needs_more and sampling_round < max_sampling_rounds and sample_size <= max_sample:
         sampling_round += 1
@@ -555,73 +539,92 @@ def attributes_phase(state: InteractiveIngestionState) -> dict:
                     s[h] = str(row[i]).strip()[:80]
             samples.append(s)
 
-        cols = profile_columns.invoke({"headers": headers, "rows": current_rows})
-        col_profiles = []
-        for c in cols[:40]:
-            col_profiles.append({
-                "name": c["name"],
-                "unique": c["unique"],
-                "non_null": c["non_null"],
-                "sample": c["sample"][:3],
-            })
-
-        # EAV detection
         eav_info = _detect_eav_format(headers, current_rows)
-        eav_text = json.dumps(eav_info, indent=2) if eav_info["is_eav"] else "(data appears to be in standard columnar format)"
-
-        # Metadata scanning
+        eav_text = json.dumps(eav_info, indent=2) if eav_info["is_eav"] else "(standard columnar format)"
         metadata_context = _read_metadata_rows(state)
+        col_names_text = "\n".join(f"{i+1}. {h}" for i, h in enumerate(headers[:60]))
 
-        few_shots = []
-        seen_targets = set()
-        for h in headers[:10]:
-            vals = []
-            for row in current_rows:
-                idx = headers.index(h)
-                if idx < len(row) and row[idx] is not None and str(row[idx]).strip():
-                    vals.append(str(row[idx]).strip()[:40])
-            if not vals:
-                continue
-            matches = fetch_similar_examples(h, vals, k=2)
-            for m in matches:
-                tgt = m["target_attribute"]
-                if tgt and tgt not in seen_targets:
-                    few_shots.append(m)
-                    seen_targets.add(tgt)
-                    if len(few_shots) >= 5:
-                        break
-            if len(few_shots) >= 5:
-                break
-
-        few_shots_text = "\n".join(
-            f'- "{fs["column_name"]}" → {fs["target_attribute"]} ({fs["attribute_type"]}, {fs["attribute_data_type"]}, mandatory={str(fs["mandatory"]).lower()})'
-            for fs in few_shots
-        ) if few_shots else "(no historical corrections available)"
-
-        previous_errors = state.get("attributes", {}).get("validation_errors", [])
-        validation_errors_text = "\n".join(
-            f'- {e["field"]}: {e["issue"]}'
-            for e in previous_errors
-        ) if previous_errors else "(none)"
-
-        prompt = ATTRIBUTES_PROMPT.format(
+        screen_prompt = SCREENING_PROMPT.format(
             filename=os.path.basename(state["file_path"]),
-            profiles=json.dumps(col_profiles, indent=2),
+            column_names=col_names_text,
             samples=json.dumps(samples, indent=2),
             sample_count=sample_size,
             metadata_context=metadata_context,
             eav_info=eav_text,
-            few_shots=few_shots_text,
-            feedback=feedback or "(none — first attempt)",
-            validation_errors_text=validation_errors_text,
         )
 
-        result = _llm_json(prompt)
-        needs_more = result.get("needs_more_samples", False) and result.get("sampling_confidence", 100) < 70
+        screen_result = _llm_json(screen_prompt)
+        attr_columns = screen_result.get("attribute_columns", [])
+        needs_more = screen_result.get("needs_more_samples", False)
 
         if needs_more:
             sample_size = min(sample_size * 2, max_sample)
-            logger.info(f"attributes | sampling round {sampling_round}: increased to {sample_size} rows")
+            logger.info(f"attributes | screen round {sampling_round}: {sample_size} rows, {len(attr_columns)} attr cols")
+
+    # If screening found nothing useful, fall back to all headers
+    if not attr_columns:
+        attr_columns = [h for h in headers if h.strip()]
+        logger.info("attributes | screening returned empty — using all headers")
+
+    # ── Step 2: Full mapping on screened columns ──────────────
+    cols = profile_columns.invoke({"headers": headers, "rows": all_data_rows})
+    attr_col_set = set(attr_columns)
+    filtered_profiles = [
+        {"name": c["name"], "unique": c["unique"], "non_null": c["non_null"], "sample": c["sample"][:3]}
+        for c in cols if c["name"] in attr_col_set
+    ]
+
+    sample_rows = all_data_rows[:5]
+    samples = []
+    for row in sample_rows:
+        s = {}
+        for i, h in enumerate(headers):
+            if i < len(row) and row[i] is not None and str(row[i]).strip():
+                s[h] = str(row[i]).strip()[:80]
+        samples.append(s)
+
+    few_shots = []
+    seen_targets = set()
+    for h in attr_columns[:10]:
+        vals = []
+        for row in all_data_rows:
+            idx = headers.index(h)
+            if idx < len(row) and row[idx] is not None and str(row[idx]).strip():
+                vals.append(str(row[idx]).strip()[:40])
+        if not vals:
+            continue
+        matches = fetch_similar_examples(h, vals, k=2)
+        for m in matches:
+            tgt = m["target_attribute"]
+            if tgt and tgt not in seen_targets:
+                few_shots.append(m)
+                seen_targets.add(tgt)
+                if len(few_shots) >= 5:
+                    break
+        if len(few_shots) >= 5:
+            break
+
+    few_shots_text = "\n".join(
+        f'- "{fs["column_name"]}" → {fs["target_attribute"]} ({fs["attribute_type"]}, {fs["attribute_data_type"]}, mandatory={str(fs["mandatory"]).lower()})'
+        for fs in few_shots
+    ) if few_shots else "(no historical corrections available)"
+
+    previous_errors = state.get("attributes", {}).get("validation_errors", [])
+    validation_errors_text = "\n".join(
+        f'- {e["field"]}: {e["issue"]}'
+        for e in previous_errors
+    ) if previous_errors else "(none)"
+
+    map_prompt = MAPPING_PROMPT.format(
+        filename=os.path.basename(state["file_path"]),
+        profiles=json.dumps(filtered_profiles[:40], indent=2),
+        samples=json.dumps(samples, indent=2),
+        few_shots=few_shots_text,
+        feedback=feedback or "(none — first attempt)",
+        validation_errors_text=validation_errors_text,
+    )
+
+    result = _llm_json(map_prompt)
 
     all_items = []
     for group in result.get("suggestions", []):
@@ -685,7 +688,7 @@ def attributes_phase(state: InteractiveIngestionState) -> dict:
     )
     state.setdefault("messages", []).append({"role": "assistant", "content": msg})
 
-    logger.info(f"attributes | core={len(core_group)} custom={len(custom_group)} errors={len(validation_errors)}")
+    logger.info(f"attributes | screened {len(attr_columns)} cols | core={len(core_group)} custom={len(custom_group)} errors={len(validation_errors)}")
     return state
 
 
