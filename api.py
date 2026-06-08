@@ -759,8 +759,23 @@ async def interactive_respond(req: InteractiveRespondRequest, request: Request):
     new_phase = new_vals.get("current_phase", "complete")
 
     if new_phase == "complete":
-        # Render is done
         files = new_vals.get("generated_files", [])
+        # Log approved mappings to LangSmith for future learning
+        try:
+            from helpers import fingerprint_headers
+            profile = new_vals.get("profile_data", {})
+            headers = profile.get("headers", [])
+            if headers:
+                fp = fingerprint_headers(headers)
+                core = new_vals.get("core_mappings", {})
+                custom = new_vals.get("custom_mappings", {})
+                mapping_list = [
+                    {"source_column": col, "target_attribute": tgt}
+                    for tgt, col in {**core, **{v: k for k, v in custom.items()}}.items()
+                ]
+                log_corrections(mapping_list, profile.get("profiles", []), fingerprint=fp)
+        except Exception as exc:
+            logger.warning(f"interactive | log_corrections failed: {exc}")
         return {
             "status": "complete",
             "thread_id": req.thread_id,

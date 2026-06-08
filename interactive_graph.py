@@ -402,6 +402,8 @@ attribute_type rules:
 - Description/notes → RichText (length=65536)
 - Codes, names, numbers, prices → Textbox
 - Multi-value tags/features → MultiSelect (constraint=true)
+- Multi-value predefined choices (e.g. multiple categories) → MultiSelectDropdown (constraint=true)
+- Text with predefined options + free-text entry → MultiTextBox (constraint=true)
 - Date fields → Date
 - Image URLs → Textbox, length=2048
 
@@ -1113,8 +1115,15 @@ builder.add_conditional_edges(
      "references": "references", "products": "products", "render": "render"},
 )
 
-# Use MemorySaver (Postgres can be swapped in)
-checkpointer = MemorySaver()
+postgres_uri = os.getenv("POSTGRES_URI")
+if postgres_uri:
+    from langgraph.checkpoint.postgres import PostgresSaver
+    from psycopg_pool import ConnectionPool
+    pool = ConnectionPool(conninfo=postgres_uri, max_size=5)
+    checkpointer = PostgresSaver(pool)
+    checkpointer.setup()
+else:
+    checkpointer = MemorySaver()
 
 interactive_graph = builder.compile(
     checkpointer=checkpointer,
