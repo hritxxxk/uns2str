@@ -156,11 +156,11 @@ body{
 .role{font-size:13px;font-weight:600;margin-bottom:6px;}
 .bubble{
   color:#374151;
-  line-height:1.7;
-  font-size:15px;
+  line-height:1.5;
+  font-size:14px;
   white-space:pre-wrap;
 }
-.bubble p{margin-bottom:10px;}
+.bubble p{margin-bottom:6px;}
 .bubble p:last-child{margin-bottom:0;}
 
 /* ── UPLOAD ZONE ─────────────────────────────────── */
@@ -465,7 +465,7 @@ body{
   <!-- TOPBAR -->
   <header class="topbar">
     <div class="topbar-left">
-      <div class="logo-badge">✦</div>
+      <div class="logo-badge">AI</div>
       <h3>VinAI Onboarding</h3>
       <span class="model-pill">Interactive 4-Phase</span>
     </div>
@@ -762,6 +762,40 @@ function renderDownloadText(files) {
   return text;
 }
 
+function renderExportUI(threadId) {
+  return '\n\n<details style="margin-top:12px;"><summary style="cursor:pointer;color:var(--purple);font-weight:600;">\u{1F4E4} Export to marketplace</summary>'
+    + '<div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">'
+    + '<select id="exportPlatform" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px;font-family:inherit;">'
+    + '<option value="Shopify">Shopify</option>'
+    + '<option value="Myntra">Myntra</option>'
+    + '</select>'
+    + '<button class="btn btn-primary" style="font-size:12px;padding:6px 14px;" onclick="handleExport(\'' + threadId + '\')">Export</button>'
+    + '<span id="exportStatus" style="font-size:12px;color:var(--muted);"></span>'
+    + '</div></details>';
+}
+
+async function handleExport(threadId) {
+  const platform = document.getElementById('exportPlatform').value;
+  const statusEl = document.getElementById('exportStatus');
+  statusEl.textContent = 'Exporting...';
+  try {
+    const resp = await fetch('/interactive/export', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ thread_id: threadId, target_platform: platform }),
+    });
+    const result = await resp.json();
+    if (result.status === 'success') {
+      const name = result.filename;
+      statusEl.innerHTML = ' \u2705 <a href="/output/' + name + '" download style="color:var(--purple);">Download ' + platform + ' export</a>';
+    } else {
+      statusEl.textContent = ' Export failed';
+    }
+  } catch (err) {
+    statusEl.textContent = ' Error: ' + err.message;
+  }
+}
+
 // ─── START ONBOARDING (SSE) ───────────────────────
 
 function startOnboarding(filePath, sheetName) {
@@ -800,7 +834,7 @@ function startOnboarding(filePath, sheetName) {
           removeBackgroundIndicator();
           addProgress(data.message);
           if (data.details) {
-            phaseIndicator.textContent = `📊 ${data.details.columns} cols · ${data.details.rows} rows`;
+            phaseIndicator.textContent = `${data.details.columns} cols · ${data.details.rows} rows`;
           }
         } else if (data.type === 'phase') {
           removeProgress();
@@ -858,8 +892,8 @@ async function approvePhase(approved, feedback) {
 
     if (result.status === 'complete') {
       STATE.currentPhase = 'complete';
-      addMessage('ai', (result.message || 'All done!') + '\n\n' + renderDownloadText(result.generated_files || []));
-      phaseIndicator.textContent = '✅ Complete';
+      addMessage('ai', (result.message || 'All done!') + '\n\n' + renderDownloadText(result.generated_files || []) + renderExportUI(STATE.threadId));
+      phaseIndicator.textContent = 'Complete';
       status('');
       setInputEnabled(true);
     } else if (result.status === 'continue') {
@@ -899,10 +933,10 @@ function showFilePicker() {
 
     <p>We'll work through <strong>4 steps</strong> together:</p>
     <p>
-    1️⃣ <strong>Categories</strong> — I'll discover your product hierarchy<br>
-    2️⃣ <strong>Attributes</strong> — I'll map your columns to PIM fields<br>
-    3️⃣ <strong>Reference Masters</strong> — I'll extract dropdown values<br>
-    4️⃣ <strong>Products</strong> — I'll compile the final template
+    1. <strong>Categories</strong> — I will discover your product hierarchy<br>
+    2. <strong>Attributes</strong> — I will map your columns to PIM fields<br>
+    3. <strong>Reference Masters</strong> — I will extract dropdown values<br>
+    4. <strong>Products</strong> — I will compile the final template
     </p>
     <p>Just tell me the path to your data file to get started!</p>
   `);
@@ -914,7 +948,7 @@ function showFilePicker() {
       <div class="avatar user-avatar">U</div>
       <div class="content">
         <div class="upload-zone" onclick="document.getElementById('fileInput').click()">
-          <div class="upload-icon">📂</div>
+          <div class="upload-icon">+</div>
           <div class="upload-title">Click to select a file</div>
           <div class="upload-sub">Or type the server path below</div>
           <input type="file" id="fileInput" style="display:none" accept=".csv,.xlsx,.xls" />
@@ -939,7 +973,7 @@ function showFilePicker() {
         const resp = await fetch('/upload', { method: 'POST', body: form });
         const result = await resp.json();
         document.getElementById('filePathInput').value = result.path;
-        document.querySelector('.upload-sub').textContent = '✅ File uploaded';
+        document.querySelector('.upload-sub').textContent = 'File uploaded';
       } catch (err) {
         document.getElementById('filePathInput').value = file.name;
         document.querySelector('.upload-sub').textContent = 'Upload failed, type path instead';

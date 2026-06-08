@@ -9,7 +9,7 @@ from langgraph.checkpoint.memory import MemorySaver
 
 import re
 
-from interactive_state import InteractiveIngestionState, PhaseOutput, IngestionPhase
+from interactive_state import InteractiveIngestionState, PhaseOutput
 from helpers import (
     read_file, take_rows, fingerprint_headers, extract_image_columns,
     build_product_rows, download_blank_template,
@@ -235,15 +235,15 @@ def triage_interactive(state: InteractiveIngestionState) -> dict:
 
     # Build a greeting message
     greeting = (
-        f"👋 I've loaded **{os.path.basename(path)}** "
+        f"👋 I've loaded <strong>{os.path.basename(path)}</strong> "
         f"({row_count} rows, {column_count} columns on sheet "
         f"'{sheet_name}').\n\n"
-        f"Here's the plan — we'll work through **4 steps** together:\n\n"
-        f"1️⃣ **Categories** — I'll discover your product hierarchy\n"
-        f"2️⃣ **Attributes** — I'll map your columns to PIM fields\n"
-        f"3️⃣ **Reference Masters** — I'll extract dropdown values\n"
-        f"4️⃣ **Products** — I'll compile the final template\n\n"
-        f"Ready to start with **Categories**?"
+        f"Here is the plan we will work through 4 steps together:\n\n"
+        f"1. <strong>Categories</strong> — I will discover your product hierarchy\n"
+        f"2. <strong>Attributes</strong> — I will map your columns to PIM fields\n"
+        f"3. <strong>Reference Masters</strong> — I will extract dropdown values\n"
+        f"4. <strong>Products</strong> — I will compile the final template\n\n"
+        f"Ready to start with <strong>Categories</strong>?"
     )
     state.setdefault("messages", []).append({
         "role": "assistant", "content": greeting,
@@ -482,7 +482,7 @@ Return JSON:
                     pd = vis + f"\n<details><summary>+{len(updated_paths)-5} more paths</summary>\n{hid}\n</details>"
                 else:
                     pd = "\n".join(f"- {p}" for p in updated_paths)
-                msg = f"📂 **Category Discovery**\n\n{explanation}\n\n{pd}\n\nFound **{len(updated_paths)}** paths."
+                msg = f"<strong>Category Discovery</strong>\n\n{explanation}\n\n{pd}\n\nFound <strong>{len(updated_paths)}</strong> paths."
                 state.setdefault("messages", []).append({"role": "assistant", "content": msg})
                 logger.info(f"categories | bypass | paths={len(updated_paths)} | cols={decision['specified_columns']}")
                 return state
@@ -538,7 +538,7 @@ Return JSON:
 
     if not explanation:
         if paths:
-            explanation = f"I discovered **{len(paths)}** category paths from your data."
+            explanation = f"I discovered <strong>{len(paths)}</strong> category paths from your data."
         else:
             explanation = "I wasn't able to automatically detect a clear category hierarchy."
 
@@ -556,8 +556,8 @@ Return JSON:
     state["profile_data"]["category_hierarchy"] = paths
 
     msg = (
-        f"📂 **Category Discovery**\n\n{explanation}"
-        + (f"\n\n{path_display}\n\nFound **{len(paths)}** paths. Do these look right?" if paths else "")
+        f"<strong>Category Discovery</strong>\n\n{explanation}"
+        + (f"\n\n{path_display}\n\nFound <strong>{len(paths)}</strong> paths. Do these look right?" if paths else "")
     )
     state.setdefault("messages", []).append({"role": "assistant", "content": msg})
     logger.info(f"categories | paths={len(paths)} | need_input={needs_input}")
@@ -627,10 +627,10 @@ Previous validation errors (fix these):
 
 Include BOTH `attribute_type` AND `attribute_data_type` for every mapping. Group your results into three buckets:
 
-1. **High-Confidence Core Mappings** — system-critical fields (sku_name, code, mrp)
+1. <strong>High-Confidence Core Mappings</strong> — system-critical fields (sku_name, code, mrp)
    that are clearly identified.
-2. **Custom Dynamic Attributes** — proprietary columns that should be preserved.
-3. **Low-Confidence / Ambiguous Fields** — columns where you're < 80% sure.
+2. <strong>Custom Dynamic Attributes</strong> — proprietary columns that should be preserved.
+3. <strong>Low-Confidence / Ambiguous Fields</strong> — columns where you're < 80% sure.
 
 PIM defaults (map TO these, don't recreate): sku_name, code, mrp
 
@@ -831,7 +831,7 @@ def attributes_phase(state: InteractiveIngestionState) -> dict:
                 approved=True,
                 user_feedback="",
             )
-            msg = f"📋 **Attribute Mapping**\n\n{decision.get('explanation', 'Applied your changes.')}"
+            msg = f"<strong>Attribute Mapping</strong>\n\n{decision.get('explanation', 'Applied your changes.')}"
             state.setdefault("messages", []).append({"role": "assistant", "content": msg})
             logger.info(f"attributes | bypass | core={len(core)} custom={len(custom)}")
             return state
@@ -987,7 +987,7 @@ def attributes_phase(state: InteractiveIngestionState) -> dict:
     explanation = result.get("explanation", "")
     if validation_errors:
         error_text = "; ".join(f'{e["field"]}: {e["issue"]}' for e in validation_errors[:3])
-        explanation += f"\n\n\u26a0\ufe0f **{len(validation_errors)} validation issue(s)**: {error_text}"
+        explanation += f"\n\n\u26a0\ufe0f <strong>{len(validation_errors)} validation issue(s)</strong>: {error_text}"
 
     state["attributes"] = PhaseOutput(
         explanation=explanation,
@@ -1000,7 +1000,7 @@ def attributes_phase(state: InteractiveIngestionState) -> dict:
         state["attributes"]["validation_errors"] = validation_errors
 
     msg = (
-        f"\ud83d\udccb **Attribute Mapping**\n\n{explanation}\n\n"
+        f"\ud83d\udccb <strong>Attribute Mapping</strong>\n\n{explanation}\n\n"
         f"I've grouped the mappings below. You can accept all, or tell me "
         f"about specific ones you'd like to change."
     )
@@ -1047,8 +1047,8 @@ def _apply_cached_mappings(state, cached, headers, fp):
         user_feedback="",
     )
     msg = (
-        f"\ud83d\udccb **Attribute Mapping**\n\nI recognized this file structure — "
-        f"I've loaded **{len(cached)}** saved mappings from a previous session.\n\n"
+        f"\ud83d\udccb <strong>Attribute Mapping</strong>\n\nI recognized this file structure — "
+        f"I've loaded <strong>{len(cached)}</strong> saved mappings from a previous session.\n\n"
         f"You can accept all, or tell me about specific ones you'd like to change."
     )
     state.setdefault("messages", []).append({"role": "assistant", "content": msg})
@@ -1188,7 +1188,7 @@ def references_phase(state: InteractiveIngestionState) -> dict:
                 approved=True,
                 user_feedback="",
             )
-            state.setdefault("messages", []).append({"role": "assistant", "content": "✅ Reference masters approved. Moving on..."})
+            state.setdefault("messages", []).append({"role": "assistant", "content": "Reference masters approved. Moving on..."})
             logger.info("references | bypass | approved")
             return state
         if decision.get("keep_values"):
@@ -1242,8 +1242,8 @@ def references_phase(state: InteractiveIngestionState) -> dict:
     )
 
     msg = (
-        f"\ud83d\udcda **Reference Masters**\n\n{result.get('explanation', '')}\n\n"
-        f"I extracted **{len(suggestions)}** reference lists from your data. "
+        f"\ud83d\udcda <strong>Reference Masters</strong>\n\n{result.get('explanation', '')}\n\n"
+        f"I extracted <strong>{len(suggestions)}</strong> reference lists from your data. "
         f"Let me know if any values need cleaning up!"
     )
     state.setdefault("messages", []).append({"role": "assistant", "content": msg})
@@ -1389,7 +1389,7 @@ def products_phase(state: InteractiveIngestionState) -> dict:
     if img_url_count > 0 and (img_broken / max(img_url_count, 1)) > 0.3:
         pct = int(100 * img_broken / img_url_count)
         img_warning = (
-            f"\n\n⚠️ **{pct}% of image links appear invalid** "
+            f"\n\n<strong>{pct}% of image links appear invalid</strong> "
             f"(e.g. '{img_samples[0] if img_samples else ''}'). "
             f"Proceed anyway?"
         )
@@ -1442,8 +1442,8 @@ def products_phase(state: InteractiveIngestionState) -> dict:
     )
 
     msg = (
-        f"\ud83d\udce6 **Product Compilation**\n\n{result.get('explanation', '')}\n\n"
-        f"**{row_count}** products across **{total_cols}** columns ready.\n\n"
+        f"\ud83d\udce6 <strong>Product Compilation</strong>\n\n{result.get('explanation', '')}\n\n"
+        f"<strong>{row_count}</strong> products across <strong>{total_cols}</strong> columns ready.\n\n"
         f"Shall I proceed with generating the final PIM templates?"
     )
     state.setdefault("messages", []).append({"role": "assistant", "content": msg})
@@ -1530,7 +1530,7 @@ def render_interactive(state: InteractiveIngestionState) -> dict:
     state["current_phase"] = "complete"
 
     msg = (
-        f"✅ **All done!** I've generated **{len(files)}** PIM template files:\n\n"
+        f"<strong>All done!</strong> I've generated <strong>{len(files)}</strong> PIM template files:\n\n"
         + "\n".join(f"- `{v.split('/')[-1]}`" for v in files.values())
         + "\n\nYou can download them now. They're ready for upload to your PIM."
     )
