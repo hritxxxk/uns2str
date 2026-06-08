@@ -48,11 +48,11 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 @app.post("/upload")
 async def upload_file(file: UploadFile = File(...)):
-    import shutil
     safe_name = f"{uuid.uuid4().hex}_{file.filename}"
     dest = os.path.join(UPLOAD_DIR, safe_name)
     with open(dest, "wb") as f:
-        shutil.copyfileobj(file.file, f)
+        while chunk := await file.read(1024 * 1024):
+            f.write(chunk)
     logger.info(f"upload | file={dest} | original={file.filename}")
 
     # If ZIP, run pre-processor pipeline
