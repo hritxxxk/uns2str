@@ -34,7 +34,30 @@ def read_file(path, sheet_name=None):
     import itertools
     ext = os.path.splitext(path)[1].lower()
     if ext == ".csv":
-        with open(path, encoding="utf-8-sig") as f:
+        with open(path, "rb") as _f:
+            raw = _f.read(8192)
+        _enc = "cp1252"
+        for _candidate in ["utf-8-sig", "cp1252", "latin-1"]:
+            try:
+                raw.decode(_candidate)
+                _enc = _candidate
+                break
+            except (UnicodeDecodeError, LookupError):
+                continue
+        # Prefer detected encoding over default cp1252 if confident
+        if _enc == "cp1252":
+            try:
+                from charset_normalizer import detect as _cd
+                _r = _cd(raw)
+                if _r.get("encoding") and _r.get("confidence", 0) >= 0.9:
+                    try:
+                        raw.decode(_r["encoding"])
+                        _enc = _r["encoding"]
+                    except (UnicodeDecodeError, LookupError):
+                        pass
+            except Exception:
+                pass
+        with open(path, encoding=_enc, errors="replace") as f:
             yield from csv.reader(f)
         return
     if ext in (".xlsx", ".xls"):
