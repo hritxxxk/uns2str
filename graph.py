@@ -82,15 +82,12 @@ def triage_source(state: dict) -> dict:
         sheet_count = 1
         total_row_count = 1 + sum(1 for _ in gen)
 
-    header_row = 0
-    for i, row in enumerate(first_rows):
-        cleaned = [str(c).strip() for c in row if c is not None and str(c).strip()]
-        if cleaned:
-            header_row = i
-            break
+    from agents import detect_header_via_llm
+    header_row, data_start_row = detect_header_via_llm(first_rows)
 
     headers = [str(c) if c is not None else "" for c in first_rows[header_row]]
-    data_start_row = header_row + 1
+    if data_start_row < header_row + 1:
+        data_start_row = header_row + 1
     row_count = total_row_count - data_start_row
     if row_count < 0:
         row_count = 0

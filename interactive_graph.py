@@ -176,16 +176,13 @@ def triage_interactive(state: InteractiveIngestionState) -> dict:
         sheet_count = 1
         total_row_count = 1 + sum(1 for _ in gen)
 
-    # Detect header row
-    header_row = 0
-    for i, row in enumerate(first_rows):
-        cleaned = [str(c).strip() for c in row if c is not None and str(c).strip()]
-        if cleaned:
-            header_row = i
-            break
+    # Detect header row via LLM (handles metadata rows between header and data)
+    from agents import detect_header_via_llm
+    header_row, data_start_row = detect_header_via_llm(first_rows)
 
     headers = [str(c) if c is not None else "" for c in first_rows[header_row]]
-    data_start_row = header_row + 1
+    if data_start_row < header_row + 1:
+        data_start_row = header_row + 1
     row_count = total_row_count - data_start_row
     if row_count < 0:
         row_count = 0
@@ -439,12 +436,7 @@ Return JSON:
             else:
                 msg = "No problem — I'll proceed with the primary sheet."
             state.setdefault("messages", []).append({"role": "assistant", "content": msg})
-            return state 
-            msg = f"Merged sheets using '{merge.get('key_column')}' key. Proceeding with the merged data." 
-        else: 
-            msg = "Could not merge sheets. Proceeding with the primary sheet only." 
-            state.setdefault("messages", []).append({"role": "assistant", "content": msg}) 
-            return state 
+            return state
         if decision.get("is_off_topic"):
             redirect = decision.get("redirect_message", "Let's keep the focus on your product data onboarding.")
             state.setdefault("messages", []).append({"role": "assistant", "content": redirect})
