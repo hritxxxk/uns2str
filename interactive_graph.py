@@ -254,13 +254,18 @@ def parse_category_feedback(feedback: str) -> dict:
 Analyze this user feedback for product category onboarding.
 Determine if they are explicitly asking to combine or build the category tree from specific columns.
 
+If the user is asking about something NOT related to PIM/product categories (e.g. general chat, jokes, weather, programming help),
+set is_off_topic = true and provide a polite redirect.
+
 User feedback: "{feedback}"
 
-You must return a valid JSON object matching this schema:
+Return valid JSON:
 {{
-    "is_direct_override": bool,
-    "specified_columns": ["col1", "col2", ...],
-    "explanation": "string"
+    "is_off_topic": false,
+    "is_direct_override": false,
+    "specified_columns": [],
+    "redirect_message": "",
+    "explanation": ""
 }}
 
 JSON:
@@ -268,7 +273,7 @@ JSON:
     try:
         return _llm_json(prompt)
     except Exception:
-        return {"is_direct_override": False, "specified_columns": [], "explanation": ""}
+        return {"is_off_topic": False, "is_direct_override": False, "specified_columns": [], "redirect_message": "", "explanation": ""}
 
 
 def build_paths_from_generator(file_path: str, sheet_name: str | None, columns: list[str]) -> list[str]:
@@ -308,6 +313,11 @@ def categories_phase(state: InteractiveIngestionState) -> dict:
     # ── Intent parsing bypass ────────────────────────────────
     if feedback:
         decision = parse_category_feedback(feedback)
+        if decision.get("is_off_topic"):
+            redirect = decision.get("redirect_message", "Let's keep the focus on your product data onboarding.")
+            state.setdefault("messages", []).append({"role": "assistant", "content": redirect})
+            logger.info(f"categories | off-topic | redirect sent")
+            return state
         if decision.get("is_direct_override") and decision.get("specified_columns"):
             updated_paths = build_paths_from_generator(file_path, sheet_name, decision["specified_columns"])
             if updated_paths:
@@ -541,15 +551,20 @@ def parse_attribute_feedback(feedback: str) -> dict:
 Analyze this user feedback about PIM attribute mappings.
 Determine if they are asking to add, remove, or change column-to-attribute mappings.
 
+If the user is asking about something NOT related to PIM/product attributes (e.g. general chat, jokes, weather, programming help),
+set is_off_topic = true and provide a polite redirect.
+
 User feedback: "{feedback}"
 
 Return valid JSON:
 {{
-    "has_override": bool,
-    "add_mappings": [{{"column": "col", "mapped_to": "attr", "type": "Textbox", "data_type": "varchar"}}],
-    "remove_columns": ["col1", "col2"],
-    "remap": [{{"column": "old", "new_target": "new"}}],
-    "explanation": "string"
+    "is_off_topic": false,
+    "has_override": false,
+    "add_mappings": [],
+    "remove_columns": [],
+    "remap": [],
+    "redirect_message": "",
+    "explanation": ""
 }}
 
 Rules:
@@ -564,7 +579,7 @@ JSON:
     try:
         return _llm_json(prompt)
     except Exception:
-        return {"has_override": False, "add_mappings": [], "remove_columns": [], "remap": [], "explanation": ""}
+        return {"is_off_topic": False, "has_override": False, "add_mappings": [], "remove_columns": [], "remap": [], "redirect_message": "", "explanation": ""}
 
 
 def attributes_phase(state: InteractiveIngestionState) -> dict:
@@ -591,6 +606,11 @@ def attributes_phase(state: InteractiveIngestionState) -> dict:
     # ── Intent parsing bypass ────────────────────────────────
     if feedback:
         decision = parse_attribute_feedback(feedback)
+        if decision.get("is_off_topic"):
+            redirect = decision.get("redirect_message", "Let's keep the focus on your product data attributes.")
+            state.setdefault("messages", []).append({"role": "assistant", "content": redirect})
+            logger.info(f"attributes | off-topic | redirect sent")
+            return state
         if decision.get("has_override"):
             core = dict(state.get("core_mappings", {}))
             custom = dict(state.get("custom_mappings", {}))
@@ -1019,14 +1039,19 @@ def parse_product_feedback(feedback: str) -> dict:
 Analyze this user feedback about product compilation.
 Determine if they want to exclude any columns from the output, or if they're approving.
 
+If the user is asking about something NOT related to PIM/product compilation (e.g. general chat, jokes, weather, programming help),
+set is_off_topic = true and provide a polite redirect.
+
 User feedback: "{feedback}"
 
 Return valid JSON:
 {{
-    "has_override": bool,
-    "exclude_columns": ["col1", "col2"],
-    "is_approval": bool,
-    "explanation": "string"
+    "is_off_topic": false,
+    "has_override": false,
+    "exclude_columns": [],
+    "is_approval": false,
+    "redirect_message": "",
+    "explanation": ""
 }}
 
 Rules:
@@ -1039,7 +1064,7 @@ JSON:
     try:
         return _llm_json(prompt)
     except Exception:
-        return {"has_override": False, "exclude_columns": [], "is_approval": False, "explanation": ""}
+        return {"is_off_topic": False, "has_override": False, "exclude_columns": [], "is_approval": False, "redirect_message": "", "explanation": ""}
 
 
 def products_phase(state: InteractiveIngestionState) -> dict:
@@ -1070,6 +1095,11 @@ def products_phase(state: InteractiveIngestionState) -> dict:
     # ── Intent parsing bypass ────────────────────────────────
     if feedback:
         decision = parse_product_feedback(feedback)
+        if decision.get("is_off_topic"):
+            redirect = decision.get("redirect_message", "Let's keep the focus on your product data compilation.")
+            state.setdefault("messages", []).append({"role": "assistant", "content": redirect})
+            logger.info(f"products | off-topic | redirect sent")
+            return state
         if decision.get("is_approval"):
             state["products"] = PhaseOutput(
                 explanation="Proceeding with product compilation.",
