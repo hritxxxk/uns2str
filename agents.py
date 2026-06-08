@@ -881,3 +881,89 @@ def check_confidence(state: dict) -> dict:
         state.setdefault("messages", []).append({"role": "assistant", "content": msg})
 
     return state
+
+
+# ─── ZIP Pre-Processor: Union Recipe ──────────────────────────
+
+UNION_RECIPE_PROMPT = """You are a PIM data consolidation expert analyzing marketplace export files.
+
+You are given the headers and sample rows from multiple source files that need to be merged into a single unified product catalog.
+
+Your task: create a ConsolidationRecipe JSON that maps each source file's columns to standardized PIM attributes.
+
+PIM target attributes (map source columns TO these):
+- code (product SKU/identifier)
+- sku_name (product title/name)
+- mrp (price)
+- brand
+- category_path
+- description
+- size
+- color
+- material
+- gender
+- season
+- image_1 through image_9
+
+Source files and their headers:
+{profiles_json}
+
+For each file, identify which columns map to which PIM target attributes.
+Different platforms use different names for the same thing:
+- Shopify "Variant SKU" → code
+- Flipkart "Style Code" → code
+- Amazon "seller-sku" → code
+- Magento "sku" → code
+- WooCommerce "SKU" → code
+- Meesho "Product Code" → code
+
+Available transformations: strip_and_uppercase, strip_and_lowercase, to_float, strip_html, null
+
+Return JSON:
+{{
+  "target_mappings": {{
+    "code": {{
+      "sources": {{"Shopify.csv": "Variant SKU", "Flipkart.xlsx": "Style Code"}},
+      "transformation": "strip_and_uppercase"
+    }},
+    "sku_name": {{
+      "sources": {{"Shopify.csv": "Title"}},
+      "transformation": "strip_html"
+    }},
+    "mrp": {{
+      "sources": {{"Shopify.csv": "Variant Price"}},
+      "transformation": "to_float"
+    }}
+  }},
+  "unified_headers": ["code", "sku_name", "mrp", "brand", "description", "size", "color", "category_path", "image_1", "image_2", "image_3"],
+  "summary": "Combined Shopify and Flipkart exports into unified product catalog."
+}}
+
+IMPORTANT:
+- Every source file must have at least its code column mapped.
+- For columns that don't map to any PIM target, exclude them.
+- Keep unified_headers concise: only include attributes that have at least one source mapping.
+"""
+
+
+def build_union_recipe(file_profiles: dict) -> dict:
+    """Analyze headers from multiple source files and generate a ConsolidationRecipe.
+
+    Args:
+        file_profiles: dict from profile_files() — {filename: {headers, samples, row_count, ext}}
+
+    Returns:
+        ConsolidationRecipe dict with target_mappings and unified_headers.
+    """
+    profiles_json = json.dumps(file_profiles, indent=2)
+    prompt = UNION_RECIPE_PROMPT.format(profiles_json=profiles_json)
+    result = call_llm(prompt)
+
+    if isinstance(result, list):
+        result = result[0] if result else {}
+
+    if "target_mappings" not in result:
+        logger.warning("build_union_recipe: LLM did not return target_mappings")
+        return {"target_mappings": {}, "unified_headers": [], "summary": "Failed to generate recipe."}
+
+    return result

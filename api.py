@@ -54,6 +54,44 @@ async def upload_file(file: UploadFile = File(...)):
     with open(dest, "wb") as f:
         shutil.copyfileobj(file.file, f)
     logger.info(f"upload | file={dest} | original={file.filename}")
+
+    # If ZIP, run pre-processor pipeline
+    if file.filename and file.filename.lower().endswith(".zip"):
+        logger.info(f"upload | zip detected | running pre-processor")
+        try:
+            from helpers_zip import extract_zip, cleanup_temp, profile_files
+            from agents import build_union_recipe
+            from merger import merge_sources, deduplicate_fuzzy
+
+            temp_dir, extracted = extract_zip(dest)
+            profiles = profile_files(temp_dir, extracted)
+
+            if not profiles:
+                cleanup_temp(temp_dir)
+                return {"path": dest, "filename": safe_name, "warning": "No supported files found in ZIP."}
+
+            recipe = build_union_recipe(profiles)
+
+            master_name = f"{uuid.uuid4().hex}_master.csv"
+            master_path = os.path.join(UPLOAD_DIR, master_name)
+            merge_sources(recipe, temp_dir, master_path)
+            deduplicate_fuzzy(master_path)
+
+            cleanup_temp(temp_dir)
+            logger.info(f"upload | zip processed | master={master_path}")
+            return {
+                "path": master_path,
+                "filename": master_name,
+                "original_zip": safe_name,
+                "files_found": list(profiles.keys()),
+                "summary": recipe.get("summary", ""),
+            }
+        except Exception as exc:
+            logger.warning(f"upload | zip processing failed: {exc}")
+            import traceback
+            traceback.print_exc()
+            return {"path": dest, "filename": safe_name, "warning": f"ZIP processing failed: {exc}"}
+
     return {"path": dest, "filename": safe_name}
 
 
@@ -580,8 +618,6 @@ def _build_interactive_initial(file_path: str, sheet_name: str | None, jwt: str)
         "categories": PhaseOutput(explanation="", reasoning="", suggestions=[], approved=False, user_feedback=""),
         "attributes": PhaseOutput(explanation="", reasoning="", suggestions=[], approved=False, user_feedback=""),
         "references": PhaseOutput(explanation="", reasoning="", suggestions=[], approved=False, user_feedback=""),
-        "products": PhaseOutput(explanation="", reasoning="", suggestions=[], approved=False, user_feedback=""),
-        "core_mappings": {},
         "custom_mappings": {},
         "mapping_confidence": {},
         "generated_files": [],
