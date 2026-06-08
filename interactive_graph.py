@@ -261,6 +261,21 @@ def triage_interactive(state: InteractiveIngestionState) -> dict:
 # This node delegates to it, then wraps the result in a PhaseOutput.
 
 
+def answer_category_query(query: str, paths: list, explanation: str) -> str:
+    prompt = f"""
+Answer the user's question based ONLY on the category data below.
+If the answer isn't in the data, say so politely.
+
+Discovered category paths: {json.dumps(paths[:30])}
+Previous analysis: {explanation[:400] if explanation else '(none)'}
+User question: "{query}"
+
+Return JSON: {{"answer": "your response here"}}
+"""
+    result = _llm_json(prompt)
+    return result.get("answer", "I don't have that information about your categories.")
+
+
 def parse_category_feedback(feedback: str) -> dict:
     prompt = f""" 
 Analyze this user feedback for product category onboarding. 
@@ -465,6 +480,17 @@ Return JSON:
                 state.setdefault("messages", []).append({"role": "assistant", "content": msg})
                 logger.info(f"categories | bypass | paths={len(updated_paths)} | cols={decision['specified_columns']}")
                 return state
+
+    # ── Conversational fallback ───────────────────────────────
+    if feedback:
+        existing = state.get("categories", {})
+        existing_paths = state.get("profile_data", {}).get("category_hierarchy", [])
+        existing_explanation = existing.get("explanation", "")
+        if existing_explanation or existing_paths:
+            answer = answer_category_query(feedback, existing_paths, existing_explanation)
+            state.setdefault("messages", []).append({"role": "assistant", "content": answer})
+            logger.info(f"categories | conversational | answered from state")
+            return state
 
     # ── Standard extraction via agents.py ────────────────────
     profile = state.get("profile_data", {})

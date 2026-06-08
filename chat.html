@@ -714,7 +714,12 @@ function formatSuggestions(suggestions, phase) {
       }
     }
   }
-  return lines.join('\n');
+  if (lines.length <= 10) {
+    return lines.join('\n');
+  }
+  var first = lines.slice(0, 5).join('\n');
+  var rest = lines.slice(5).join('\n');
+  return first + '\n<details style="margin-top:4px;font-size:13px;"><summary style="cursor:pointer;color:var(--muted);">+' + (lines.length - 5) + ' more</summary><div style="margin-top:4px;">' + rest + '</div></details>';
 }
 
 function escapeHtml(str) {
