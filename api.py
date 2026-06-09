@@ -38,6 +38,16 @@ app = FastAPI(
 async def health():
     return {"status": "ok", "service": "pim-ingestion-agent", "version": "1.0.0"}
 
+@app.get("/cost")
+async def cost():
+    from rate_limiter import get_session_cost, reset_session_cost
+    return get_session_cost()
+
+@app.post("/cost/reset")
+async def cost_reset():
+    from rate_limiter import reset_session_cost
+    return reset_session_cost()
+
 # Serve the chat frontend at root
 @app.get("/")
 async def serve_chat():

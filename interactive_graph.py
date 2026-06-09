@@ -50,6 +50,8 @@ client = google_genai.Client(api_key=api_key)
 # ─── Helpers ──────────────────────────────────────────────────────
 
 def _llm_json(prompt: str, temperature: float = 1.0) -> dict:
+    from rate_limiter import wait_for_capacity, track_cost
+    wait_for_capacity()
     resp = client.models.generate_content(
         model="gemini-2.5-flash-lite",
         contents=prompt,
@@ -58,6 +60,7 @@ def _llm_json(prompt: str, temperature: float = 1.0) -> dict:
             "temperature": temperature,
         },
     )
+    track_cost(prompt, resp.text)
     try:
         return json.loads(resp.text)
     except json.JSONDecodeError:
@@ -2487,10 +2490,12 @@ def agent_reason_node(state: InteractiveIngestionState) -> dict:
         temperature=1.0,
     ).bind_tools(agent_tools)
 
+    from rate_limiter import wait_for_capacity, track_cost
+    wait_for_capacity()
     response = llm.invoke(lc_messages)
+    track_cost(str(lc_messages), str(response.content) if hasattr(response, 'content') else '')
 
     # Bug 2 Fix: Return ONLY the new response (delta).
-    # Do NOT mutate state['messages'] in-place. Reducer appends it.
     return {"messages": [response]}
 
 
