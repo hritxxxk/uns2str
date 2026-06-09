@@ -1,0 +1,34 @@
+# Version control
+.git/
+.gitignore
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+
+# Runtime data (mounted as volumes at deploy time)
+output/
+cache/
+uploads/
+
+# Client source data (not needed in container)
+client-data/
+
+# Secrets
+.env
+*.key
+
+# Tests (not needed in production image)
+tests/
+STATE_*.md
+
+# Documentation
+CURRENT_STATE.md
+DOCKER.md
+
+# Development artifacts
+.reasonix/
+blank-templates/
