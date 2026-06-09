@@ -11,6 +11,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.tools import tool
 from typing import Annotated
 from langgraph.prebuilt import InjectedState
+from langgraph.types import Command
 
 import re
 
@@ -353,23 +354,20 @@ def build_paths_from_generator(file_path: str, sheet_name: str | None, columns: 
     gen = read_file(file_path, sheet_name)
     headers_row = None
     for row in gen:
-        vals = [str(c).strip() for c in row if c is not None and str(c).strip()]
-        if vals:
+        vals = [c for c in row if c is not None and str(c).strip() and str(c).strip().lower() != "none"]
+        if len(vals) >= 10:
             headers_row = row
             break
     if headers_row is None:
         return []
-    headers = [str(c).strip() for c in headers_row if c is not None]
+    headers_raw = [str(c).strip() if c is not None else "" for c in headers_row]
     col_indices = []
     for col in columns:
         col_clean = col.strip()
-        if col_clean in headers:
-            col_indices.append(headers.index(col_clean))
-        else:
-            # Case-insensitive fallback
-            match = [h for h in headers if h.lower() == col_clean.lower()]
-            if match:
-                col_indices.append(headers.index(match[0]))
+        for i, h in enumerate(headers_raw):
+            if h == col_clean or h.lower() == col_clean.lower():
+                col_indices.append(i)
+                break
     if not col_indices:
         return []
     paths = set()
@@ -1606,7 +1604,7 @@ def profile_file(
     file_path: str,
     sheet_name: str | None = None,
     state: Annotated[dict, InjectedState()] = None,
-) -> str:
+) -> Command:
     """Analyse a spreadsheet structure. Call first on new files.
     Detects headers, rows, columns, and cached mappings.
 
@@ -1731,10 +1729,36 @@ def profile_file(
         state["completed_phases"].append("triage")
 
     cache_note = f" I also found {len(cached)} saved mappings from a previous session." if cached else ""
-    return (
-        f"Profiled **{os.path.basename(file_path)}** — sheet **{sheet_name}**, "
-        f"{row_count} rows, {len(headers)} columns.{cache_note}\n\n"
-        f"Headers: {', '.join(headers[:10])}{'...' if len(headers) > 10 else ''}"
+    return Command(
+        update={
+            "sheet_name": sheet_name,
+            "profile_data": {
+                "headers": headers,
+                "sample_rows": [{headers[i]: str(r[i])[:60] for i in range(min(len(headers), len(r))) if r[i] is not None and str(r[i]).strip()} for r in data_rows_list[:3]],
+                "row_count": row_count,
+                "column_count": len(headers),
+                "header_row": header_row,
+                "data_start_row": data_start_row,
+                "profiles": cols,
+                "category_hierarchy": [],
+            },
+            "all_sheets": all_sheets,
+            "categories": _make_empty_phase(),
+            "attributes": _make_empty_phase(),
+            "references": _make_empty_phase(),
+            "products": _make_empty_phase(),
+            "core_mappings": {},
+            "custom_mappings": {},
+            "mapping_confidence": {},
+            "generated_files": [],
+            "product_rows": [],
+            "completed_phases": ["triage"],
+        },
+        value=(
+            f"Profiled **{os.path.basename(file_path)}** — sheet **{sheet_name}**, "
+            f"{row_count} rows, {len(headers)} columns.{cache_note}\n\n"
+            f"Headers: {', '.join(headers[:10])}{'...' if len(headers) > 10 else ''}"
+        ),
     )
 
 
@@ -1744,7 +1768,7 @@ def extract_categories(
     sheet_name: str | None = None,
     specified_columns: list[str] | None = None,
     state: Annotated[dict, InjectedState()] = None,
-) -> str:
+) -> Command:
     """Extract product category hierarchy from spreadsheet columns.
     Uses 5-strategy fallback. Pass specified_columns if you know which cols.
 
@@ -1786,13 +1810,28 @@ def extract_categories(
                 user_feedback="",
             )
             path_summary = "\n".join(f"- {p}" for p in updated_paths[:8])
-            return (
-                f"Extracted **{len(updated_paths)}** category paths from columns "
-                f"{', '.join(specified_columns)}.\n\n"
-                f"{path_summary}"
-                + (f"\n\n+{len(updated_paths) - 8} more paths" if len(updated_paths) > 8 else "")
+            return Command(
+                update={
+                    "profile_data": {
+                        **state.get("profile_data", {}),
+                        "category_hierarchy": updated_paths,
+                    },
+                    "categories": PhaseOutput(
+                        explanation=f"Built from columns: {', '.join(specified_columns)}",
+                        reasoning=f"Programmatic extraction from {len(specified_columns)} columns",
+                        suggestions=[{"type": "item", "label": p, "confidence": 100, "reasoning": "Direct column extraction"} for p in updated_paths],
+                        approved=True,
+                        user_feedback="",
+                    ),
+                },
+                value=(
+                    f"Extracted **{len(updated_paths)}** category paths from columns "
+                    f"{', '.join(specified_columns)}.\n\n"
+                    f"{path_summary}"
+                    + (f"\n\n+{len(updated_paths) - 8} more paths" if len(updated_paths) > 8 else "")
+                ),
             )
-        return "Could not extract paths from those columns. Try different column names."
+        return Command(value="Could not extract paths from those columns. Try different column names.")
 
     # Standard 5-strategy fallback
     cat_state = {
@@ -1818,23 +1857,31 @@ def extract_categories(
     explanation = cat_state.get("category_reasoning", "")
     needs_input = cat_state.get("need_user_input", False)
 
-    state["profile_data"]["category_hierarchy"] = paths
-    state["categories"] = PhaseOutput(
-        explanation=explanation or f"Discovered {len(paths)} category paths.",
-        reasoning=f"Strategy fallback chain on {len(paths)} paths.",
-        suggestions=[{"type": "item", "label": p, "confidence": 95, "reasoning": "Part of product hierarchy"} for p in paths],
-        approved=not needs_input,
-        user_feedback="",
-    )
+    cat_update = {
+        "profile_data": {
+            **state.get("profile_data", {}),
+            "category_hierarchy": paths,
+        },
+        "categories": PhaseOutput(
+            explanation=explanation or f"Discovered {len(paths)} category paths.",
+            reasoning=f"Strategy fallback chain on {len(paths)} paths.",
+            suggestions=[{"type": "item", "label": p, "confidence": 95, "reasoning": "Part of product hierarchy"} for p in paths],
+            approved=not needs_input,
+            user_feedback="",
+        ),
+    }
 
     if not paths:
-        return "I wasn't able to detect a clear category hierarchy from this file."
+        return Command(update=cat_update, value="I wasn't able to detect a clear category hierarchy from this file.")
 
     path_summary = "\n".join(f"- {p}" for p in paths[:8])
-    return (
-        f"Discovered **{len(paths)}** category paths.\n\n{path_summary}"
-        + (f"\n\n+{len(paths) - 8} more paths" if len(paths) > 8 else "")
-        + ("\n\nSome paths may need review — do they look correct?" if needs_input else "")
+    return Command(
+        update=cat_update,
+        value=(
+            f"Discovered **{len(paths)}** category paths.\n\n{path_summary}"
+            + (f"\n\n+{len(paths) - 8} more paths" if len(paths) > 8 else "")
+            + ("\n\nSome paths may need review — do they look correct?" if needs_input else "")
+        ),
     )
 
 
@@ -1844,7 +1891,7 @@ def map_attributes(
     sheet_name: str | None = None,
     feedback: str | None = None,
     state: Annotated[dict, InjectedState()] = None,
-) -> str:
+) -> Command:
     """Map source columns to PIM attributes. Core (sku/code/mrp) + custom.
     Screens cols in rounds, validates types, caches by fingerprint.
 
@@ -1890,16 +1937,24 @@ def map_attributes(
                 state["core_mappings"][tgt] = src
             else:
                 state["custom_mappings"][src] = src
-        state["attributes"] = PhaseOutput(
-            explanation=f"Loaded {len(cached)} mappings from cache.",
-            reasoning="Fingerprint cache hit.",
-            suggestions=[],
-            approved=False,
-            user_feedback="",
+        completed = list(state.get("completed_phases", []))
+        if "attributes" not in completed:
+            completed.append("attributes")
+        return Command(
+            update={
+                "core_mappings": state.get("core_mappings", {}),
+                "custom_mappings": state.get("custom_mappings", {}),
+                "attributes": PhaseOutput(
+                    explanation=f"Loaded {len(cached)} mappings from cache.",
+                    reasoning="Fingerprint cache hit.",
+                    suggestions=[],
+                    approved=False,
+                    user_feedback="",
+                ),
+                "completed_phases": completed,
+            },
+            value=f"Loaded **{len(cached)}** saved mappings from a previous session (fingerprint: {fp}).",
         )
-        if "attributes" not in state["completed_phases"]:
-            state["completed_phases"].append("attributes")
-        return f"Loaded **{len(cached)}** saved mappings from a previous session (fingerprint: {fp})."
 
     # Step 1: Column screening (adaptive sampling)
     max_sample = min(len(all_data_rows), 500)
@@ -2012,30 +2067,37 @@ def map_attributes(
                    for it in all_items]
     save_cached_mapping(fp, cache_data)
 
-    state["attributes"] = PhaseOutput(
-        explanation=result.get("explanation", "Attribute mapping complete."),
-        reasoning=result.get("reasoning", ""),
-        suggestions=result.get("suggestions", []),
-        approved=False,
-        user_feedback="",
-    )
+    completed = list(state.get("completed_phases", []))
+    if "attributes" not in completed:
+        completed.append("attributes")
 
-    if "attributes" not in state["completed_phases"]:
-        state["completed_phases"].append("attributes")
-
-    return (
-        f"Mapped **{len(core_group) + len(custom_group)}** attributes "
-        f"({len(core_group)} core + {len(custom_group)} custom).\n\n"
-        + ("\n".join(f"- `{col}` → **{tgt}**" for tgt, col in core_group.items())
-           if core_group else "No core mappings identified.")
-        + ("\n\nCustom attributes ready for review." if custom_group else "")
+    return Command(
+        update={
+            "core_mappings": core_group,
+            "custom_mappings": custom_group,
+            "attributes": PhaseOutput(
+                explanation=result.get("explanation", "Attribute mapping complete."),
+                reasoning=result.get("reasoning", ""),
+                suggestions=result.get("suggestions", []),
+                approved=False,
+                user_feedback="",
+            ),
+            "completed_phases": completed,
+        },
+        value=(
+            f"Mapped **{len(core_group) + len(custom_group)}** attributes "
+            f"({len(core_group)} core + {len(custom_group)} custom).\n\n"
+            + ("\n".join(f"- `{col}` → **{tgt}**" for tgt, col in core_group.items())
+               if core_group else "No core mappings identified.")
+            + ("\n\nCustom attributes ready for review." if custom_group else "")
+        ),
     )
 
 
 @tool
 def extract_references(
     state: Annotated[dict, InjectedState()] = None,
-) -> str:
+) -> Command:
     """Extract unique values for Dropdown/MultiSelect attributes.
     Reads mappings from state. Call after map_attributes.
     No args needed."""
@@ -2054,8 +2116,8 @@ def extract_references(
                 try:
                     import polars as pl
                     from helpers_data_plane import get_lazy_frame, detect_header_row_and_headers
-                    hr, _, _ = _detect_header_row_and_headers(state["file_path"], state.get("sheet_name"))
-                    lazy = _get_lazy_frame(state["file_path"], state.get("sheet_name"), hr, pr["headers"])
+                    hr, _, _ = detect_header_row_and_headers(state["file_path"], state.get("sheet_name"))
+                    lazy = get_lazy_frame(state["file_path"], state.get("sheet_name"), hr, pr["headers"])
                     uniq_vals = lazy.select(pl.col(p["column_name"]).unique()).collect(streaming=True)[p["column_name"]].to_list()
                     uniq_vals = [str(v) for v in uniq_vals if v is not None]
                 except Exception:
@@ -2100,23 +2162,35 @@ def extract_references(
         user_feedback="",
     )
 
-    state.setdefault("completed_phases", [])
-    if "references" not in state["completed_phases"]:
-        state["completed_phases"].append("references")
+    completed = list(state.get("completed_phases", []))
+    if "references" not in completed:
+        completed.append("references")
+
+    ref_update = {
+        "references": PhaseOutput(
+            explanation=f"Extracted {len(suggestions)} reference masters.",
+            reasoning="Programmatic extraction from column profiles.",
+            suggestions=suggestions,
+            approved=False,
+            user_feedback="",
+        ),
+        "completed_phases": completed,
+    }
 
     if not suggestions:
-        return "No Dropdown or MultiSelect attributes found — no reference masters to extract."
+        return Command(update=ref_update, value="No Dropdown or MultiSelect attributes found — no reference masters to extract.")
 
     summary = "\n".join(f"- **{s['label']}**: {s['unique_count']} values — {', '.join(str(v) for v in s['values'][:5])}" for s in suggestions)
-    return (
-        f"Extracted **{len(suggestions)}** reference masters.\n\n{summary}"
+    return Command(
+        update=ref_update,
+        value=f"Extracted **{len(suggestions)}** reference masters.\n\n{summary}",
     )
 
 
 @tool
 def build_products(
     state: Annotated[dict, InjectedState()] = None,
-) -> str:
+) -> Command:
     """Build product rows from confirmed mappings + source data.
     Validates image URLs. Call after map_attributes + extract_references.
     No args needed."""
@@ -2168,30 +2242,34 @@ def build_products(
     attr_count = len(state.get("core_mappings", {})) + len(state.get("custom_mappings", {}))
     total_cols = 6 + attr_count + min(len(img_cols), 9)
 
-    state["product_rows"] = product_rows
-    state["products"] = PhaseOutput(
-        explanation=f"Built {len(product_rows)} product rows across {total_cols} columns." + img_warning,
-        reasoning=f"{row_count} source rows, {attr_count} attributes, {len(img_cols)} image columns",
-        suggestions=[],
-        approved=False,
-        user_feedback="",
-    )
+    completed = list(state.get("completed_phases", []))
+    if "products" not in completed:
+        completed.append("products")
 
-    state.setdefault("completed_phases", [])
-    if "products" not in state["completed_phases"]:
-        state["completed_phases"].append("products")
-
-    return (
-        f"Built **{len(product_rows)}** product rows across **{total_cols}** columns "
-        f"({6} fixed + {attr_count} attributes + {min(len(img_cols), 9)} image)."
-        + img_warning
+    return Command(
+        update={
+            "product_rows": product_rows if isinstance(product_rows, list) else list(product_rows),
+            "products": PhaseOutput(
+                explanation=f"Built {len(product_rows)} product rows across {total_cols} columns." + img_warning,
+                reasoning=f"{row_count} source rows, {attr_count} attributes, {len(img_cols)} image columns",
+                suggestions=[],
+                approved=False,
+                user_feedback="",
+            ),
+            "completed_phases": completed,
+        },
+        value=(
+            f"Built **{len(product_rows)}** product rows across **{total_cols}** columns "
+            f"({6} fixed + {attr_count} attributes + {min(len(img_cols), 9)} image)."
+            + img_warning
+        ),
     )
 
 
 @tool
 def render_templates(
     state: Annotated[dict, InjectedState()] = None,
-) -> str:
+) -> Command:
     """Generate 4 PIM xlsx files (category/attribute/reference/product).
     Final step. No args needed."""
     fp = fingerprint_headers(state.get("profile_data", {}).get("headers", []))
@@ -2209,7 +2287,7 @@ def render_templates(
         mapping_objs.append(ColumnMapping(source_column=col, target_attribute=preserved, confidence=1.0))
 
     if not mapping_objs:
-        return "No attribute mappings found. Please run map_attributes first."
+        return Command(value="No attribute mappings found. Please run map_attributes first.")
 
     # Build attribute definitions
     attr_defs = build_attribute_definitions.invoke({"mappings": mapping_objs})
@@ -2254,17 +2332,20 @@ def render_templates(
         "blank_attribute_path": blank_attr,
     })
 
-    state["generated_files"] = list(files.values())
-    state["product_rows"] = product_rows
-
-    state.setdefault("completed_phases", [])
-    if "render" not in state["completed_phases"]:
-        state["completed_phases"].append("render")
+    completed = list(state.get("completed_phases", []))
+    if "render" not in completed:
+        completed.append("render")
 
     file_list = "\n".join(f"- `{v.split('/')[-1]}`" for v in files.values())
-    return (
-        f"✅ Generated **{len(files)}** PIM template files:\n\n{file_list}\n\n"
-        f"They're saved to the output directory and ready to download."
+    return Command(
+        update={
+            "generated_files": list(files.values()),
+            "completed_phases": completed,
+        },
+        value=(
+            f"✅ Generated **{len(files)}** PIM template files:\n\n{file_list}\n\n"
+            f"They're saved to the output directory and ready to download."
+        ),
     )
 
 
