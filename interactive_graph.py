@@ -8,7 +8,8 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.prebuilt import ToolNode, tools_condition
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.tools import tool
+from langchain_core.tools import tool, InjectedToolCallId
+from langchain_core.messages import ToolMessage
 from typing import Annotated
 from langgraph.prebuilt import InjectedState
 from langgraph.types import Command
@@ -1634,6 +1635,7 @@ def profile_file(
     file_path: str,
     sheet_name: str | None = None,
     state: Annotated[dict, InjectedState()] = None,
+    tool_call_id: Annotated[str, InjectedToolCallId] = "",
 ) -> Command:
     """Analyse a spreadsheet structure. Call first on new files.
     Detects headers, rows, columns, and cached mappings.
@@ -1783,12 +1785,17 @@ def profile_file(
             "generated_files": [],
             "product_rows": [],
             "completed_phases": ["triage"],
+            "messages": [
+                ToolMessage(
+                    content=(
+                        f"Profiled **{os.path.basename(file_path)}** — sheet **{sheet_name}**, "
+                        f"{row_count} rows, {len(headers)} columns.{cache_note}\n\n"
+                        f"Headers: {', '.join(headers[:10])}{'...' if len(headers) > 10 else ''}"
+                    ),
+                    tool_call_id=tool_call_id,
+                )
+            ],
         },
-        value=(
-            f"Profiled **{os.path.basename(file_path)}** — sheet **{sheet_name}**, "
-            f"{row_count} rows, {len(headers)} columns.{cache_note}\n\n"
-            f"Headers: {', '.join(headers[:10])}{'...' if len(headers) > 10 else ''}"
-        ),
     )
 
 
@@ -1798,6 +1805,7 @@ def extract_categories(
     sheet_name: str | None = None,
     specified_columns: list[str] | None = None,
     state: Annotated[dict, InjectedState()] = None,
+    tool_call_id: Annotated[str, InjectedToolCallId] = "",
 ) -> Command:
     """Extract product category hierarchy from spreadsheet columns.
     Uses 5-strategy fallback. Pass specified_columns if you know which cols.
@@ -1833,7 +1841,7 @@ def extract_categories(
         if updated_paths:
             is_valid, reason = _validate_taxonomy_llm(updated_paths)
             if not is_valid:
-                return Command(value=f"The extracted values look like product codes rather than categories. {reason}")
+                return Command(update={"messages": [ToolMessage(content=f"The extracted values look like product codes rather than categories. {reason}", tool_call_id=tool_call_id)]})
             state["profile_data"]["category_hierarchy"] = updated_paths
             state["profile_data"]["category_hierarchy"] = updated_paths
             state["categories"] = PhaseOutput(
@@ -1857,15 +1865,15 @@ def extract_categories(
                         approved=True,
                         user_feedback="",
                     ),
+                    "messages": [ToolMessage(content=(
+                        f"Extracted **{len(updated_paths)}** category paths from columns "
+                        f"{', '.join(specified_columns)}.\n\n"
+                        f"{path_summary}"
+                        + (f"\n\n+{len(updated_paths) - 8} more paths" if len(updated_paths) > 8 else "")
+                    ), tool_call_id=tool_call_id)]
                 },
-                value=(
-                    f"Extracted **{len(updated_paths)}** category paths from columns "
-                    f"{', '.join(specified_columns)}.\n\n"
-                    f"{path_summary}"
-                    + (f"\n\n+{len(updated_paths) - 8} more paths" if len(updated_paths) > 8 else "")
-                ),
             )
-        return Command(value="Could not extract paths from those columns. Try different column names.")
+        return Command(update={"messages": [ToolMessage(content="Could not extract paths from those columns. Try different column names.", tool_call_id=tool_call_id)]})
 
     # Standard 5-strategy fallback
     cat_state = {
@@ -1891,7 +1899,8 @@ def extract_categories(
     if paths:
         is_valid, reason = _validate_taxonomy_llm(paths)
         if not is_valid:
-            return Command(value=f"The extracted values look like product codes rather than categories. {reason}")
+            return Command(update={"messages": [ToolMessage(content=f"The extracted values look like product codes rather than categories. {reason}", tool_call_id=tool_call_id)]})
+            
     explanation = cat_state.get("category_reasoning", "")
     needs_input = cat_state.get("need_user_input", False)
 
@@ -1910,17 +1919,17 @@ def extract_categories(
     }
 
     if not paths:
-        return Command(update=cat_update, value="I wasn't able to detect a clear category hierarchy from this file.")
+        cat_update["messages"] = [ToolMessage(content="I wasn't able to detect a clear category hierarchy from this file.", tool_call_id=tool_call_id)]
+        return Command(update=cat_update)
 
     path_summary = "\n".join(f"- {p}" for p in paths[:8])
-    return Command(
-        update=cat_update,
-        value=(
-            f"Discovered **{len(paths)}** category paths.\n\n{path_summary}"
-            + (f"\n\n+{len(paths) - 8} more paths" if len(paths) > 8 else "")
-            + ("\n\nSome paths may need review — do they look correct?" if needs_input else "")
-        ),
-    )
+    cat_update["messages"] = [ToolMessage(content=(
+        f"Discovered **{len(paths)}** category paths.\n\n{path_summary}"
+        + (f"\n\n+{len(paths) - 8} more paths" if len(paths) > 8 else "")
+        + ("\n\nSome paths may need review — do they look correct?" if needs_input else "")
+    ), tool_call_id=tool_call_id)]
+    
+    return Command(update=cat_update)
 
 
 @tool
@@ -1929,6 +1938,7 @@ def map_attributes(
     sheet_name: str | None = None,
     feedback: str | None = None,
     state: Annotated[dict, InjectedState()] = None,
+    tool_call_id: Annotated[str, InjectedToolCallId] = "",
 ) -> Command:
     """Map source columns to PIM attributes. Core (sku/code/mrp) + custom.
     Screens cols in rounds, validates types, caches by fingerprint.
@@ -1936,7 +1946,7 @@ def map_attributes(
     Args:
         file_path: Path to source file.
         sheet_name: Sheet name (omit for profiled sheet).
-        feedback: User correction text (e.g. "combine color and size").
+        feedback: User correction text.
     """
     # Resolve file path — LLM may pass bare filename missing uploads/ prefix
     if not os.path.exists(file_path):
@@ -1990,8 +2000,9 @@ def map_attributes(
                     user_feedback="",
                 ),
                 "completed_phases": completed,
+                "messages": [ToolMessage(content=(f"Loaded {len(cached)} saved mappings from previous session (fp : {fp})"), tool_call_id=tool_call_id)]
             },
-            value=f"Loaded **{len(cached)}** saved mappings from a previous session (fingerprint: {fp}).",
+            # value=f"Loaded **{len(cached)}** saved mappings from a previous session (fingerprint: {fp}).",
         )
 
     # Step 1: Column screening (adaptive sampling)
@@ -2121,20 +2132,21 @@ def map_attributes(
                 user_feedback="",
             ),
             "completed_phases": completed,
+            "messages": [ToolMessage(content=(
+                f"Mapped **{len(core_group) + len(custom_group)}** attributes "
+                f"({len(core_group)} core + {len(custom_group)} custom).\n\n"
+                + ("\n".join(f"- `{col}` → **{tgt}**" for tgt, col in core_group.items())
+                   if core_group else "No core mappings identified.")
+                + ("\n\nCustom attributes ready for review." if custom_group else "")
+            ), tool_call_id=tool_call_id)],
         },
-        value=(
-            f"Mapped **{len(core_group) + len(custom_group)}** attributes "
-            f"({len(core_group)} core + {len(custom_group)} custom).\n\n"
-            + ("\n".join(f"- `{col}` → **{tgt}**" for tgt, col in core_group.items())
-               if core_group else "No core mappings identified.")
-            + ("\n\nCustom attributes ready for review." if custom_group else "")
-        ),
     )
 
 
 @tool
 def extract_references(
     state: Annotated[dict, InjectedState()] = None,
+    tool_call_id: Annotated[str, InjectedToolCallId] = "",
 ) -> Command:
     """Extract unique values for Dropdown/MultiSelect attributes.
     Reads mappings from state. Call after map_attributes.
@@ -2216,18 +2228,20 @@ def extract_references(
     }
 
     if not suggestions:
-        return Command(update=ref_update, value="No Dropdown or MultiSelect attributes found — no reference masters to extract.")
+        ref_update["messages"] = [ToolMessage(content="No Dropdown or MultiSelect attributes found — no reference masters to extract.", tool_call_id=tool_call_id)]
+        return Command(update=ref_update)
 
     summary = "\n".join(f"- **{s['label']}**: {s['unique_count']} values — {', '.join(str(v) for v in s['values'][:5])}" for s in suggestions)
-    return Command(
-        update=ref_update,
-        value=f"Extracted **{len(suggestions)}** reference masters.\n\n{summary}",
-    )
+    
+    ref_update["messages"] = [ToolMessage(content=f"Extracted **{len(suggestions)}** reference masters.\n\n{summary}", tool_call_id=tool_call_id)]
+    
+    return Command(update=ref_update)
 
 
 @tool
 def build_products(
     state: Annotated[dict, InjectedState()] = None,
+    tool_call_id: Annotated[str, InjectedToolCallId] = "",
 ) -> Command:
     """Build product rows from confirmed mappings + source data.
     Validates image URLs. Call after map_attributes + extract_references.
@@ -2295,18 +2309,19 @@ def build_products(
                 user_feedback="",
             ),
             "completed_phases": completed,
+            "messages": [ToolMessage(content=(
+                f"Built **{len(product_rows)}** product rows across **{total_cols}** columns "
+                f"({6} fixed + {attr_count} attributes + {min(len(img_cols), 9)} image)."
+                + img_warning
+            ), tool_call_id=tool_call_id)],
         },
-        value=(
-            f"Built **{len(product_rows)}** product rows across **{total_cols}** columns "
-            f"({6} fixed + {attr_count} attributes + {min(len(img_cols), 9)} image)."
-            + img_warning
-        ),
     )
 
 
 @tool
 def render_templates(
     state: Annotated[dict, InjectedState()] = None,
+    tool_call_id: Annotated[str, InjectedToolCallId] = "",
 ) -> Command:
     """Generate 4 PIM xlsx files (category/attribute/reference/product).
     Final step. No args needed."""
@@ -2325,7 +2340,7 @@ def render_templates(
         mapping_objs.append(ColumnMapping(source_column=col, target_attribute=preserved, confidence=1.0))
 
     if not mapping_objs:
-        return Command(value="No attribute mappings found. Please run map_attributes first.")
+        return Command(update={"messages": [ToolMessage(content="No attribute mappings found. Please run map_attributes first.", tool_call_id=tool_call_id)]},)
 
     # Build attribute definitions
     attr_defs = build_attribute_definitions.invoke({"mappings": mapping_objs})
@@ -2379,11 +2394,11 @@ def render_templates(
         update={
             "generated_files": list(files.values()),
             "completed_phases": completed,
+            "messages": [ToolMessage(content=(
+                f"✅ Generated **{len(files)}** PIM template files:\n\n{file_list}\n\n"
+                f"They're saved to the output directory and ready to download."
+            ), tool_call_id=tool_call_id)],
         },
-        value=(
-            f"✅ Generated **{len(files)}** PIM template files:\n\n{file_list}\n\n"
-            f"They're saved to the output directory and ready to download."
-        ),
     )
 
 

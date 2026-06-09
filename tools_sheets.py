@@ -5,7 +5,7 @@ from langchain_core.tools import tool
 from langgraph.types import Command
 from langgraph.prebuilt import InjectedState
 import polars as pl
-from helpers_data_plane import get_lazy_frame, detect_header_row_and_headers
+from helpers_data_plane import get_lazy_frame
 
 logger = logging.getLogger("pim_sheets")
 
