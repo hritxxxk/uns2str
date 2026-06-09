@@ -6,3 +6,4 @@ __pycache__/
 *.pyc
 .reasonix/
 uploads/
+STATE_*.md
