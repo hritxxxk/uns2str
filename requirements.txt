@@ -1,6 +1,5 @@
 # PIM Ingestion Agent
 google-genai==2.8.0
-langchain==1.2.10
 langchain-core==1.4.0
 langchain-google-genai==4.2.4
 langgraph==1.2.4
