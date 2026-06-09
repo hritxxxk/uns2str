@@ -2344,28 +2344,31 @@ def agent_reason_node(state: InteractiveIngestionState) -> dict:
 # ─── Agent Router ───────────────────────────────────────────────
 
 def route_agent_action(state: InteractiveIngestionState) -> str:
-    """Route based on whether the last message has tool_calls, with a 2-iteration budget."""
+    """Pure router — checks for tool_calls and budget without mutating state."""
     messages = state.get("messages", [])
     if not messages:
         return END
 
     last = messages[-1]
-
-    # Check if the last message contains tool calls
     has_tool_calls = hasattr(last, "tool_calls") and last.tool_calls
 
     if has_tool_calls:
         budget = state.get("remaining_steps", 0)
         if budget > 0:
-            state["remaining_steps"] = budget - 1
-            logger.info(f"agent | routing to tools | remaining_steps={budget - 1}")
-            return "execute_tools"
-        else:
-            logger.warning("agent | budget exhausted — forcing conversational response")
-            return END
+            logger.info(f"agent | routing to decrement_budget | remaining_steps={budget}")
+            return "decrement_budget"
+        logger.warning("agent | budget exhausted — forcing conversational response")
+        return END
 
     logger.info("agent | routing to END (conversational response)")
     return END
+
+
+def decrement_budget_node(state: InteractiveIngestionState) -> dict:
+    """Decrements the tool call budget. Runs when route_agent_action finds tool_calls with budget > 0."""
+    budget = state.get("remaining_steps", 0)
+    logger.info(f"budget | decrementing: {budget} → {budget - 1}")
+    return {"remaining_steps": budget - 1}
 
 
 # ─── START Router ─────────────────────────────────────────────
@@ -2388,6 +2391,7 @@ tool_node = ToolNode(agent_tools)
 
 builder.add_node("triage", triage_interactive)
 builder.add_node("agent", agent_reason_node)
+builder.add_node("decrement_budget", decrement_budget_node)
 builder.add_node("execute_tools", tool_node)
 
 builder.add_conditional_edges(
@@ -2396,12 +2400,13 @@ builder.add_conditional_edges(
     {"triage": "triage", "agent": "agent"},
 )
 builder.add_edge("triage", "agent")
+builder.add_edge("decrement_budget", "execute_tools")
 builder.add_edge("execute_tools", "agent")
 
 builder.add_conditional_edges(
     "agent",
     route_agent_action,
-    {"execute_tools": "execute_tools", END: END},
+    {"decrement_budget": "decrement_budget", END: END},
 )
 
 postgres_uri = os.getenv("POSTGRES_URI")
