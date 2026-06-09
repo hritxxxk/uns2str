@@ -27,6 +27,9 @@ from helpers import (
 from tools.mapping import build_attribute_definitions
 from tools.references import extract_reference_values
 from tools.rendering import render_all_templates
+from tools_enrichment import enrich_descriptions
+from tools_merger import merge_duplicates
+from tools_sheets import merge_sheets_programmatically
 from tools.profiling import profile_columns
 from learning import fetch_similar_examples
 from state import PIM_DEFAULTS, ColumnMapping
@@ -2393,12 +2396,17 @@ AGENT_SYSTEM_PROMPT = """You are VinGPT, a PIM data onboarding assistant. Guide 
 2. categories → extract_categories  | 3. attributes → map_attributes
 4. references → extract_references  | 5. products → build_products
 6. render → render_templates
+7. enrich → enrich_descriptions (if user asks to fill missing descriptions)
+8. merge_duplicates → merge_duplicates (if user asks to find/merge near-duplicates)
+9. merge_sheets → merge_sheets_programmatically (if file has multiple sheets to join)
 
 Do NOT skip ahead. If a milestone isn't in completed_phases, run it next.
 
 ## Rules
 - Explain before calling a tool. Present results clearly and ask confirmation.
 - If a tool returns empty/fails: do NOT retry the same turn. Tell the user what happened, ask a simple yes/no.
+- Don't call enrich_descriptions or merge_duplicates before build_products has run.
+- If the workbook has multiple sheets with related data, suggest merge_sheets_programmatically to the user.
 - No jargon: use "missing values" not "null", "column layout" not "schema".
 - Off-topic user? Redirect back to the current phase politely.
 - If the user asks to see/list/show data, present it directly in your response.
@@ -2458,7 +2466,7 @@ def agent_reason_node(state: InteractiveIngestionState) -> dict:
     lc_messages = [SystemMessage(content=AGENT_SYSTEM_PROMPT)] + lc_messages
 
     # Build the agent LLM with tools bound
-    agent_tools = [profile_file, extract_categories, map_attributes, extract_references, build_products, render_templates]
+    agent_tools = [profile_file, extract_categories, map_attributes, extract_references, build_products, render_templates, enrich_descriptions, merge_duplicates, merge_sheets_programmatically]
     llm = ChatGoogleGenerativeAI(
         model="gemini-2.5-flash",
         temperature=1.0,
@@ -2516,7 +2524,7 @@ def route_start(state: InteractiveIngestionState) -> str:
 builder = StateGraph(InteractiveIngestionState)
 
 # Register tools with ToolNode
-agent_tools = [profile_file, extract_categories, map_attributes, extract_references, build_products, render_templates]
+agent_tools = [profile_file, extract_categories, map_attributes, extract_references, build_products, render_templates, enrich_descriptions, merge_duplicates, merge_sheets_programmatically]
 tool_node = ToolNode(agent_tools)
 
 builder.add_node("triage", triage_interactive)
