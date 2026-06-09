@@ -1,1085 +1,1034 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>wee</title>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PIM Agent</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <style>
-:root{
-  --bg:#f8f9fc;
-  --white:#ffffff;
-  --border:#e2e5ed;
-  --border-light:#f0f2f6;
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-  --purple:#7c3aed;
-  --purple-light:#ede9fe;
-  --purple-hover:#6d28d9;
-  --purple-soft:#f5f3ff;
+  :root {
+    --bg:            #ffffff;
+    --bg-subtle:     #f9fafb;
+    --bg-elevated:   #f3f4f6;
+    --bg-hover:      #e5e7eb;
+    --border:        #e5e7eb;
+    --border-light:  #f0f0f0;
+    --text:          #111827;
+    --text-secondary:#6b7280;
+    --text-muted:    #9ca3af;
+    --accent:        #6E56CF;
+    --accent-subtle: #f5f3ff;
+    --accent-border: #ddd6fe;
+    --green:         #059669;
+    --green-subtle:  #ecfdf5;
+    --amber:         #d97706;
+    --amber-subtle:  #fffbeb;
+    --red:           #dc2626;
+    --red-subtle:    #fef2f2;
+    --radius:        12px;
+    --radius-sm:     8px;
+    --radius-full:   9999px;
+    --font:          'Inter', -apple-system, system-ui, sans-serif;
+    --chat-w:        720px;
+    --header-h:      56px;
+    --shadow:        0 1px 3px rgba(0,0,0,.08), 0 1px 2px rgba(0,0,0,.04);
+    --shadow-lg:     0 4px 16px rgba(0,0,0,.1);
+  }
 
-  --text:#1e1e2e;
-  --muted:#6b7280;
-  --muted-light:#9ca3af;
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:            #0f0f0f;
+      --bg-subtle:     #1a1a1a;
+      --bg-elevated:   #222;
+      --bg-hover:      #2a2a2a;
+      --border:        #2a2a2a;
+      --border-light:  #1f1f1f;
+      --text:          #e5e5e5;
+      --text-secondary:#888;
+      --text-muted:    #666;
+      --accent-subtle: #1a1430;
+      --accent-border: #2a2050;
+      --green-subtle:  #0a1f14;
+      --amber-subtle:  #1f1508;
+      --red-subtle:    #1f0a0a;
+      --shadow:        0 1px 3px rgba(0,0,0,.3);
+      --shadow-lg:     0 4px 16px rgba(0,0,0,.4);
+    }
+  }
 
-  --green:#10b981;
-  --green-light:#d1fae5;
-  --amber:#f59e0b;
-  --amber-light:#fef3c7;
+  html, body { height: 100%; overflow: hidden; background: var(--bg); color: var(--text); font-family: var(--font); font-size: 14px; line-height: 1.6; -webkit-font-smoothing: antialiased; }
 
-  --shadow:0 1px 3px rgba(0,0,0,.06), 0 1px 2px rgba(0,0,0,.04);
-  --shadow-lg:0 4px 14px rgba(0,0,0,.08);
-  --radius:12px;
-  --radius-lg:18px;
-}
+  /* ─── Layout ─── */
+  .app { display: flex; flex-direction: column; height: 100vh; }
 
-*{margin:0;padding:0;box-sizing:border-box;}
+  /* ─── Header ─── */
+  .header {
+    height: var(--header-h); flex-shrink: 0;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 20px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg);
+    position: relative; z-index: 10;
+  }
+  .header-left  { display: flex; align-items: center; gap: 12px; min-width: 0; }
+  .header-right { display: flex; align-items: center; gap: 8px; }
 
-body{
-  font-family:Inter,-apple-system,sans-serif;
-  background:var(--bg);
-  color:var(--text);
-  height:100vh;
-  overflow:hidden;
-}
+  .header-brand { display: flex; align-items: center; gap: 8px; }
+  .logo {
+    width: 28px; height: 28px; flex-shrink: 0;
+    background: linear-gradient(135deg, var(--accent) 0%, #9C7EF0 100%);
+    border-radius: 7px;
+    display: grid; place-items: center;
+  }
+  .logo svg { width: 14px; height: 14px; fill: #fff; stroke: none; }
+  .brand-text { font-size: 15px; font-weight: 600; letter-spacing: -.3px; }
+  .brand-badge {
+    font-size: 10px; font-weight: 500; padding: 2px 7px;
+    background: var(--accent-subtle); color: var(--accent);
+    border-radius: var(--radius-full);
+    font-family: var(--font);
+  }
 
-/* ── APP LAYOUT ──────────────────────────────────── */
-.app{
-  display:flex;
-  flex-direction:column;
-  height:100vh;
-}
+  .header-file {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 13px; color: var(--text-secondary);
+    border-left: 1px solid var(--border); padding-left: 12px; margin-left: 4px;
+    min-width: 0;
+  }
+  .header-file svg { width: 14px; height: 14px; fill: none; stroke: currentColor; flex-shrink: 0; }
+  .header-filename { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 180px; }
 
-/* ── TOPBAR ──────────────────────────────────────── */
-.topbar{
-  height:60px;
-  border-bottom:1px solid var(--border);
-  display:flex;
-  align-items:center;
-  justify-content:space-between;
-  padding:0 24px;
-  background:rgba(255,255,255,.85);
-  backdrop-filter:blur(8px);
-  flex-shrink:0;
-}
-.topbar-left{
-  display:flex;
-  align-items:center;
-  gap:12px;
-}
-.topbar-left .logo-badge{
-  width:32px;height:32px;
-  border-radius:8px;
-  background:var(--purple);
-  color:white;
-  display:flex;
-  align-items:center;
-  justify-content:center;
-  font-size:15px;
-  flex-shrink:0;
-}
-.topbar-left h3{
-  font-size:15px;
-  font-weight:600;
-}
-.model-pill{
-  background:var(--purple-soft);
-  color:var(--purple);
-  border:1px solid var(--purple-light);
-  padding:4px 10px;
-  border-radius:999px;
-  font-size:11px;
-  font-weight:500;
-}
+  .btn {
+    padding: 6px 12px; border-radius: var(--radius-sm);
+    background: none; border: 1px solid var(--border);
+    color: var(--text-secondary); font-family: var(--font); font-size: 13px;
+    cursor: pointer; display: flex; align-items: center; gap: 6px;
+    transition: background .12s, color .12s, border-color .12s;
+  }
+  .btn:hover { background: var(--bg-elevated); color: var(--text); border-color: var(--bg-hover); }
+  .btn svg { width: 14px; height: 14px; fill: none; stroke: currentColor; }
+  .btn-primary {
+    background: var(--accent); border-color: var(--accent); color: #fff;
+  }
+  .btn-primary:hover { background: #5a46b8; border-color: #5a46b8; color: #fff; }
 
-.topbar-right{
-  display:flex;
-  align-items:center;
-  gap:12px;
-}
+  .btn-icon {
+    width: 32px; height: 32px; padding: 0;
+    display: grid; place-items: center;
+    border-radius: 6px;
+  }
 
-.phase-badge-top{
-  font-size:12px;
-  color:var(--muted);
-  font-weight:500;
-}
+  .status-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    display: inline-block; vertical-align: middle;
+  }
+  .dot-idle { background: var(--text-muted); }
+  .dot-running { background: var(--amber); animation: pulse 1s ease-in-out infinite; }
+  .dot-ready { background: var(--green); }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
 
-.new-chat-btn{
-  background:var(--purple);
-  border:none;
-  color:white;
-  height:34px;
-  padding:0 14px;
-  border-radius:8px;
-  font-weight:600;
-  font-size:13px;
-  cursor:pointer;
-  transition:.2s;
-  display:flex;
-  align-items:center;
-  gap:6px;
-}
-.new-chat-btn:hover{background:var(--purple-hover);}
+  /* ─── Chat ─── */
+  .chat { flex: 1; overflow-y: auto; min-height: 0; }
+  .chat-inner {
+    max-width: var(--chat-w); margin: 0 auto;
+    padding: 0 20px 20px;
+    display: flex; flex-direction: column;
+  }
 
-/* ── CHAT FEED ───────────────────────────────────── */
-.chat-feed{
-  flex:1;
-  overflow-y:auto;
-  padding:32px 0 120px;
-  scroll-behavior:smooth;
-}
-.message{
-  display:flex;
-  justify-content:center;
-  padding:0 24px;
-  margin-bottom:28px;
-}
-.message-inner{
-  width:100%;
-  max-width:820px;
-  display:flex;
-  gap:14px;
-}
-.avatar{
-  width:36px;height:36px;
-  border-radius:10px;
-  flex-shrink:0;
-  display:flex;
-  align-items:center;
-  justify-content:center;
-  font-weight:700;
-  font-size:12px;
-}
-.ai-avatar{background:var(--purple);color:white;}
-.user-avatar{background:#e5e7eb;color:var(--muted);}
-.content{flex:1;padding-top:4px;min-width:0;}
-.role{font-size:13px;font-weight:600;margin-bottom:6px;}
-.bubble{
-  color:#374151;
-  line-height:1.5;
-  font-size:14px;
-  white-space:pre-wrap;
-}
-.bubble p{margin-bottom:6px;}
-.bubble p:last-child{margin-bottom:0;}
+  /* Empty state */
+  .empty-state {
+    flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 12px; padding: 60px 20px;
+    text-align: center;
+    min-height: 400px;
+  }
+  .empty-icon {
+    width: 64px; height: 64px; border-radius: 18px;
+    background: var(--accent-subtle); border: 1px solid var(--accent-border);
+    display: grid; place-items: center;
+  }
+  .empty-icon svg { width: 28px; height: 28px; fill: none; stroke: var(--accent); stroke-width: 1.5; }
+  .empty-title { font-size: 18px; font-weight: 600; color: var(--text); }
+  .empty-sub   { font-size: 14px; color: var(--text-secondary); max-width: 360px; line-height: 1.5; }
 
-/* ── UPLOAD ZONE ─────────────────────────────────── */
-.upload-zone{
-  border:1.5px dashed var(--border);
-  border-radius:var(--radius-lg);
-  padding:32px 20px;
-  text-align:center;
-  background:var(--white);
-  transition:.2s;
-  cursor:pointer;
-  margin-top:12px;
-}
-.upload-zone:hover{
-  border-color:var(--purple);
-  background:var(--purple-soft);
-}
-.upload-icon{font-size:28px;margin-bottom:8px;}
-.upload-title{font-size:14px;font-weight:600;color:var(--text);}
-.upload-sub{font-size:12px;color:var(--muted);margin-top:4px;}
+  /* Upload zone in empty state */
+  .upload-area {
+    width: 100%; max-width: 400px;
+    margin-top: 8px;
+    padding: 40px 24px;
+    border: 2px dashed var(--border);
+    border-radius: 16px;
+    display: flex; flex-direction: column; align-items: center; gap: 12px;
+    cursor: pointer; position: relative;
+    transition: border-color .2s, background .2s;
+  }
+  .upload-area:hover, .upload-area.drag-over {
+    border-color: var(--accent);
+    background: var(--accent-subtle);
+  }
+  .upload-area input[type=file] {
+    position: absolute; inset: 0; opacity: 0; cursor: pointer;
+    width: 100%; height: 100%;
+  }
+  .upload-label { font-size: 13px; font-weight: 500; color: var(--text-secondary); }
+  .upload-hint  { font-size: 12px; color: var(--text-muted); font-family: var(--font); }
+  .upload-progress {
+    width: 100%; max-width: 400px; margin-top: 12px;
+    display: none; flex-direction: column; gap: 4px;
+  }
+  .upload-progress.visible { display: flex; }
+  .progress-track { height: 4px; background: var(--bg-elevated); border-radius: 2px; overflow: hidden; }
+  .progress-fill  { height: 100%; width: 0%; transition: width .3s ease; border-radius: 2px; }
+  .progress-fill.ok { background: var(--accent); }
+  .progress-fill.err { background: var(--red); }
+  .progress-status { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
 
-/* ── PROGRESS ────────────────────────────────────── */
-.progress-card{
-  margin-top:12px;
-  background:var(--white);
-  border:1px solid var(--border);
-  border-radius:var(--radius);
-  padding:14px 16px;
-  display:flex;
-  align-items:center;
-  gap:12px;
-  box-shadow:var(--shadow);
-}
-.progress-spinner{
-  width:18px;height:18px;
-  border:2px solid var(--border);
-  border-top-color:var(--purple);
-  border-radius:50%;
-  animation:spin .8s linear infinite;
-  flex-shrink:0;
-}
-@keyframes spin{to{transform:rotate(360deg)}}
-.progress-text{font-size:13px;color:var(--muted);}
+  /* Messages */
+  .msg { padding: 16px 0 0; max-width: var(--chat-w); }
+  .msg-header {
+    display: flex; align-items: center; gap: 8px;
+    margin-bottom: 4px;
+    padding: 0 2px;
+  }
+  .msg-avatar {
+    width: 26px; height: 26px; border-radius: 50%; flex-shrink: 0;
+    display: grid; place-items: center;
+    font-size: 10px; font-weight: 600;
+  }
+  .msg-avatar.ai {
+    background: var(--accent); color: #fff;
+  }
+  .msg-avatar.you {
+    background: var(--bg-elevated); color: var(--text-secondary);
+    border: 1px solid var(--border);
+  }
+  .msg-author { font-size: 13px; font-weight: 600; }
+  .msg-time   { font-size: 11px; color: var(--text-muted); }
 
-/* ── PHASE CARD ──────────────────────────────────── */
-.phase-card{
-  margin-top:14px;
-  background:var(--white);
-  border:1px solid var(--border);
-  border-radius:var(--radius-lg);
-  overflow:hidden;
-  box-shadow:var(--shadow);
-}
-.phase-header{
-  padding:14px 18px;
-  border-bottom:1px solid var(--border-light);
-  font-weight:600;
-  font-size:14px;
-  display:flex;
-  align-items:center;
-  gap:10px;
-}
-.phase-badge{
-  font-size:11px;
-  background:var(--purple-soft);
-  color:var(--purple);
-  padding:2px 8px;
-  border-radius:999px;
-  font-weight:500;
-}
-.phase-body{padding:16px 18px;}
+  .msg-content {
+    font-size: 14px; line-height: 1.7;
+    padding: 0 2px;
+    color: var(--text);
+  }
 
-/* ── SUGGESTION GROUPS ───────────────────────────── */
-.suggestion-group{margin-bottom:16px;}
-.suggestion-group:last-child{margin-bottom:0;}
-.group-header{
-  font-size:12px;
-  font-weight:600;
-  text-transform:uppercase;
-  letter-spacing:.04em;
-  color:var(--muted);
-  margin-bottom:8px;
-  padding-bottom:6px;
-  border-bottom:1px solid var(--border-light);
-}
-.suggestion-item{
-  display:flex;
-  align-items:center;
-  gap:10px;
-  padding:8px 10px;
-  background:var(--bg);
-  border-radius:8px;
-  margin-bottom:6px;
-  font-size:13px;
-}
-.suggestion-item.conf-high{border-left:3px solid var(--green);}
-.suggestion-item.conf-low{border-left:3px solid var(--amber);}
-.suggestion-item .col-name{font-weight:600;flex-shrink:0;}
-.suggestion-item .arrow{color:var(--muted-light);margin:0 6px;}
-.suggestion-item .mapped-to{color:var(--purple);font-weight:500;}
-.suggestion-item .conf-badge{
-  font-size:11px;
-  padding:1px 6px;
-  border-radius:4px;
-  margin-left:auto;
-  flex-shrink:0;
-}
-.conf-high .conf-badge{background:var(--green-light);color:#065f46;}
-.conf-low .conf-badge{background:var(--amber-light);color:#92400e;}
-.suggestion-item .reason{font-size:12px;color:var(--muted);margin-top:2px;}
+  .msg-content p { margin-bottom: 8px; }
+  .msg-content p:last-child { margin-bottom: 0; }
+  .msg-content strong { font-weight: 600; }
+  .msg-content code {
+    font-family: 'SF Mono', 'JetBrains Mono', monospace; font-size: 12px;
+    background: var(--bg-elevated); padding: 1px 5px; border-radius: 4px;
+    color: var(--accent);
+  }
+  .msg-content pre {
+    background: var(--bg-subtle); border: 1px solid var(--border);
+    border-radius: var(--radius-sm); padding: 12px 14px; margin: 8px 0;
+    overflow-x: auto; font-size: 12px; line-height: 1.5;
+  }
+  .msg-content pre code { background: none; padding: 0; color: inherit; }
+  .msg-content ul, .msg-content ol { padding-left: 20px; margin: 4px 0; }
+  .msg-content li { margin-bottom: 2px; }
 
-/* ── REFERENCE ITEM ──────────────────────────────── */
-.ref-item{
-  padding:10px 12px;
-  background:var(--bg);
-  border-radius:8px;
-  margin-bottom:8px;
-}
-.ref-item .ref-header{
-  display:flex;
-  justify-content:space-between;
-  font-size:13px;
-  font-weight:600;
-  margin-bottom:6px;
-}
-.ref-item .ref-values{
-  display:flex;
-  flex-wrap:wrap;
-  gap:4px;
-}
-.ref-item .ref-tag{
-  font-size:11px;
-  background:var(--white);
-  border:1px solid var(--border);
-  padding:2px 6px;
-  border-radius:4px;
-  color:var(--muted);
-}
-.ref-item .ref-tag.messy{
-  background:var(--amber-light);
-  border-color:#fcd34d;
-  color:#92400e;
-  text-decoration:line-through;
-}
-.ref-item .ref-tag.corrected{
-  background:var(--green-light);
-  border-color:#6ee7b7;
-  color:#065f46;
-}
+  /* Inline tool indicator */
+  .tool-line {
+    display: inline-flex; align-items: center; gap: 6px;
+    margin: 4px 0;
+    font-size: 12px; color: var(--text-secondary);
+    font-family: 'SF Mono', monospace;
+  }
+  .tool-line svg { width: 12px; height: 12px; fill: none; stroke: currentColor; flex-shrink: 0; }
 
-/* ── APPROVE/REJECT BAR ──────────────────────────── */
-.action-bar{
-  margin-top:16px;
-  padding:14px 18px;
-  border-top:1px solid var(--border-light);
-  display:flex;
-  gap:10px;
-  align-items:center;
-  flex-wrap:wrap;
-}
-.btn{
-  padding:8px 18px;
-  border:none;
-  border-radius:8px;
-  font-weight:600;
-  font-size:13px;
-  cursor:pointer;
-  transition:.15s;
-}
-.btn-primary{
-  background:var(--purple);
-  color:white;
-}
-.btn-primary:hover{background:var(--purple-hover);}
-.btn-primary:disabled{background:#c4b5fd;cursor:not-allowed;}
-.btn-secondary{
-  background:var(--bg);
-  color:var(--text);
-  border:1px solid var(--border);
-}
-.btn-secondary:hover{background:#e5e7eb;}
-.btn-secondary:disabled{opacity:.5;cursor:not-allowed;}
-.feedback-input{
-  flex:1;
-  min-width:200px;
-  padding:8px 12px;
-  border:1px solid var(--border);
-  border-radius:8px;
-  font-size:13px;
-  font-family:inherit;
-  outline:none;
-  background:var(--white);
-}
-.feedback-input:focus{border-color:var(--purple);}
+  /* Streaming cursor */
+  .streaming-cursor::after { content: '▋'; animation: blink .9s step-end infinite; color: var(--accent); margin-left: 1px; }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
 
-/* ── DOWNLOAD CARD ───────────────────────────────── */
-.download-card{
-  margin-top:14px;
-  background:var(--white);
-  border:1px solid var(--border);
-  border-radius:var(--radius-lg);
-  overflow:hidden;
-  box-shadow:var(--shadow);
-}
-.download-header{
-  padding:14px 18px;
-  border-bottom:1px solid var(--border-light);
-  font-weight:600;
-  font-size:14px;
-}
-.download-item{
-  display:flex;
-  align-items:center;
-  padding:10px 18px;
-  gap:12px;
-  border-bottom:1px solid var(--border-light);
-}
-.download-item:last-child{border-bottom:none;}
-.download-item .file-icon{font-size:20px;}
-.download-item .file-info{flex:1;}
-.download-item .file-name{font-size:13px;font-weight:500;}
-.download-item .file-size{font-size:11px;color:var(--muted);}
+  /* Thinking indicator */
+  .thinking {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 0; color: var(--text-muted); font-size: 13px;
+  }
+  .thinking-dots { display: flex; gap: 4px; }
+  .thinking-dots span {
+    width: 5px; height: 5px; border-radius: 50%; background: var(--text-muted);
+    animation: thinker 1.2s ease-in-out infinite;
+  }
+  .thinking-dots span:nth-child(2) { animation-delay: .2s; }
+  .thinking-dots span:nth-child(3) { animation-delay: .4s; }
+  @keyframes thinker { 0%,100%{opacity:.3;transform:translateY(0)} 50%{opacity:1;transform:translateY(-3px)} }
 
-/* ── INPUT BAR ───────────────────────────────────── */
-.input-wrap{
-  position:fixed;
-  bottom:0;
-  left:0;
-  right:0;
-  padding:20px 24px 24px;
-  background:linear-gradient(
-    to top,
-    rgba(248,249,252,1) 50%,
-    rgba(248,249,252,0) 100%
-  );
-  pointer-events:none;
-}
-.input-box{
-  max-width:820px;
-  margin:auto;
-  background:var(--white);
-  border:1px solid var(--border);
-  border-radius:var(--radius-lg);
-  display:flex;
-  align-items:flex-end;
-  padding:12px 14px;
-  gap:10px;
-  box-shadow:var(--shadow-lg);
-  pointer-events:auto;
-}
-.input-box textarea{
-  flex:1;
-  background:transparent;
-  border:none;
-  resize:none;
-  outline:none;
-  color:var(--text);
-  font-family:inherit;
-  font-size:14px;
-  max-height:120px;
-  line-height:1.5;
-}
-.input-box textarea::placeholder{color:var(--muted-light);}
-.input-box textarea:disabled{opacity:.5;}
-.send-btn{
-  width:38px;height:38px;
-  border:none;
-  border-radius:10px;
-  background:var(--purple);
-  color:white;
-  cursor:pointer;
-  font-size:15px;
-  flex-shrink:0;
-  transition:.15s;
-}
-.send-btn:hover{background:var(--purple-hover);}
-.send-btn:disabled{background:#d1d5db;cursor:not-allowed;}
+  /* File cards in messages */
+  .file-cards { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+  .file-card {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 12px; border-radius: var(--radius-sm);
+    background: var(--bg-elevated); border: 1px solid var(--border);
+    text-decoration: none; color: var(--text);
+    font-size: 13px; transition: background .12s, border-color .12s;
+  }
+  .file-card:hover { background: var(--bg-hover); }
+  .file-card svg { width: 14px; height: 14px; fill: none; stroke: var(--accent); flex-shrink: 0; }
+  .file-card-name { font-family: 'SF Mono', monospace; font-size: 11px; }
+  .file-card-dl   { font-size: 11px; color: var(--text-muted); }
 
-/* ── STATUS BAR ──────────────────────────────────── */
-.status-bar{
-  text-align:center;
-  padding:6px 16px;
-  font-size:12px;
-  color:var(--muted);
-  display:none;
-}
-.status-bar.show{display:block;}
-.status-bar.error{color:#ef4444;}
+  /* Error bubble */
+  .msg.error .msg-avatar.ai { background: var(--red); }
+  .msg.error .msg-author { color: var(--red); }
 
-@media(max-width:768px){
-  .message{padding:0 16px;}
-  .input-wrap{padding:16px;}
-  .topbar{padding:0 16px;}
-  .new-chat-btn span{display:none;}
-}
+  /* ─── Input ─── */
+  .input-area {
+    flex-shrink: 0;
+    padding: 0 20px 16px;
+    background: var(--bg);
+    border-top: 1px solid var(--border-light);
+  }
+  .input-inner {
+    max-width: var(--chat-w); margin: 0 auto;
+    display: flex; flex-direction: column; gap: 8px;
+  }
+
+  .input-box {
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 0;
+    transition: border-color .15s, box-shadow .15s;
+    display: flex; align-items: flex-end;
+    box-shadow: var(--shadow);
+  }
+  .input-box:focus-within {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(110,86,207,.12), var(--shadow);
+  }
+
+  .input-textarea {
+    flex: 1;
+    background: none; border: none; outline: none; resize: none;
+    color: var(--text); font-family: var(--font); font-size: 14px; line-height: 1.5;
+    padding: 14px 0 14px 16px;
+    min-height: 52px; max-height: 200px;
+    scrollbar-width: thin;
+  }
+  .input-textarea::placeholder { color: var(--text-muted); }
+
+  .input-actions-col {
+    display: flex; align-items: center;
+    padding: 8px 8px 8px 0;
+    gap: 4px;
+  }
+
+  .attach-btn {
+    width: 32px; height: 32px; border-radius: 8px;
+    background: none; border: none; cursor: pointer;
+    display: grid; place-items: center;
+    color: var(--text-muted);
+    transition: background .12s, color .12s;
+  }
+  .attach-btn:hover { background: var(--bg-elevated); color: var(--text-secondary); }
+  .attach-btn svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.5; }
+  .attach-btn input { position: absolute; opacity: 0; width: 0; height: 0; }
+
+  .send-btn {
+    width: 34px; height: 34px; border-radius: 10px;
+    background: var(--accent); border: none; cursor: pointer;
+    display: grid; place-items: center;
+    transition: background .15s, transform .1s, opacity .15s;
+    flex-shrink: 0;
+  }
+  .send-btn:hover   { background: #5a46b8; }
+  .send-btn:active  { transform: scale(.92); }
+  .send-btn:disabled { opacity: .35; cursor: not-allowed; transform: none; background: var(--accent); }
+  .send-btn svg { width: 16px; height: 16px; fill: none; stroke: #fff; stroke-width: 2.5; }
+
+  .input-footer {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 0 4px;
+  }
+  .input-footer-left {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 12px; color: var(--text-muted);
+  }
+  .input-footer-left svg { width: 12px; height: 12px; fill: none; stroke: currentColor; }
+  .pii-badge {
+    padding: 2px 8px; border-radius: var(--radius-full);
+    background: var(--bg-elevated); color: var(--text-muted);
+    font-size: 11px;
+  }
+
+  /* Quick actions */
+  .quick-actions {
+    display: flex; gap: 6px; flex-wrap: wrap;
+  }
+  .quick-btn {
+    padding: 5px 12px; border-radius: var(--radius-full);
+    background: var(--bg-subtle); border: 1px solid var(--border);
+    font-family: var(--font); font-size: 12px; color: var(--text-secondary);
+    cursor: pointer; transition: background .12s, color .12s, border-color .12s;
+  }
+  .quick-btn:hover {
+    background: var(--bg-elevated); color: var(--text);
+    border-color: var(--bg-hover);
+  }
+
+  /* ─── Sessions drawer ─── */
+  .sessions-overlay {
+    position: fixed; inset: 0; z-index: 50;
+    background: rgba(0,0,0,.3); backdrop-filter: blur(2px);
+    opacity: 0; pointer-events: none;
+    transition: opacity .2s;
+  }
+  .sessions-overlay.open { opacity: 1; pointer-events: all; }
+
+  .sessions-drawer {
+    position: fixed; top: 0; left: 0; bottom: 0; width: 280px; z-index: 51;
+    background: var(--bg); border-right: 1px solid var(--border);
+    transform: translateX(-100%); transition: transform .25s ease;
+    display: flex; flex-direction: column;
+    box-shadow: var(--shadow-lg);
+  }
+  .sessions-drawer.open { transform: translateX(0); }
+
+  .drawer-header {
+    padding: 16px 18px;
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .drawer-title { font-size: 14px; font-weight: 600; }
+  .drawer-close {
+    width: 28px; height: 28px; border-radius: 6px;
+    background: none; border: none; cursor: pointer;
+    display: grid; place-items: center;
+    color: var(--text-muted); transition: background .12s;
+  }
+  .drawer-close:hover { background: var(--bg-elevated); color: var(--text); }
+  .drawer-close svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; }
+
+  .drawer-list { flex: 1; overflow-y: auto; padding: 8px; }
+  .drawer-list::-webkit-scrollbar { width: 4px; }
+  .drawer-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+
+  .drawer-item {
+    padding: 10px 12px; border-radius: var(--radius-sm);
+    cursor: pointer; transition: background .12s;
+    display: flex; flex-direction: column; gap: 2px;
+  }
+  .drawer-item:hover { background: var(--bg-subtle); }
+  .drawer-item.active { background: var(--accent-subtle); }
+  .drawer-item-name { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .drawer-item-meta { font-size: 11px; color: var(--text-muted); display: flex; gap: 8px; }
+  .drawer-item-badge {
+    font-size: 10px; font-weight: 500; padding: 1px 6px; border-radius: 3px;
+    background: var(--bg-elevated); color: var(--text-muted);
+    align-self: flex-start;
+  }
+
+  .drawer-footer {
+    padding: 14px 16px;
+    border-top: 1px solid var(--border);
+    display: flex; align-items: center; gap: 10px;
+  }
+  .drawer-avatar {
+    width: 30px; height: 30px; border-radius: 50%;
+    background: var(--accent); color: #fff;
+    display: grid; place-items: center; font-size: 12px; font-weight: 600;
+    flex-shrink: 0;
+  }
+  .drawer-user-info { flex: 1; min-width: 0; }
+  .drawer-user-name { font-size: 13px; font-weight: 500; }
+  .drawer-user-plan { font-size: 11px; color: var(--text-muted); }
+
+  /* ─── Responsive ─── */
+  @media (max-width: 640px) {
+    .header { padding: 0 12px; }
+    .chat-inner { padding: 0 12px 12px; }
+    .input-area { padding: 0 12px 12px; }
+    .brand-badge { display: none; }
+    .header-file { display: none; }
+    .btn span { display: none; }
+    .empty-state { padding: 40px 16px; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: 0s !important; transition-duration: 0s !important; }
+  }
+
+  .hidden { display: none !important; }
 </style>
 </head>
 <body>
 
 <div class="app">
 
-  <!-- TOPBAR -->
-  <header class="topbar">
-    <div class="topbar-left">
-      <div class="logo-badge">AI</div>
-      <h3>wee</h3>
-      <span class="model-pill">Interactive 4-Phase</span>
+  <!-- ─── Header ─── -->
+  <header class="header">
+    <div class="header-left">
+      <button class="btn btn-icon" id="menuBtn" title="Sessions" aria-label="Open sessions">
+        <svg viewBox="0 0 24 24" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+      </button>
+      <div class="header-brand">
+        <div class="logo">
+          <svg viewBox="0 0 24 24"><path d="M4 6h16M4 10h16M4 14h10M4 18h6" stroke="white" stroke-width="1.5"/></svg>
+        </div>
+        <span class="brand-text">PIM Agent</span>
+        <span class="brand-badge">Ingestion</span>
+      </div>
+      <div class="header-file" id="headerFile" style="display:none">
+        <svg viewBox="0 0 24 24" stroke-width="1.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+        <span class="header-filename" id="headerFilename">—</span>
+        <span class="status-dot dot-idle" id="statusDot"></span>
+      </div>
     </div>
-    <div class="topbar-right">
-      <span id="phaseIndicator" class="phase-badge-top"></span>
-      <button class="new-chat-btn" onclick="resetChat()">
-        <span>+</span> <span>New</span>
+    <div class="header-right">
+      <button class="btn" id="newBtn" title="New session">
+        <svg viewBox="0 0 24 24" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        <span>New</span>
       </button>
     </div>
   </header>
 
-  <!-- CHAT FEED -->
-  <main class="chat-feed" id="chatFeed"></main>
+  <!-- ─── Chat ─── -->
+  <div class="chat" id="chat">
+    <div class="chat-inner" id="chatInner">
 
-  <!-- INPUT BAR -->
-  <div class="input-wrap" id="inputBar">
-    <div class="input-box">
-      <textarea id="chatInput" rows="1" placeholder="Type your response or file path..." disabled></textarea>
-      <button class="send-btn" id="sendBtn" disabled>↑</button>
+      <!-- Empty state / upload -->
+      <div class="empty-state" id="emptyState">
+        <div class="empty-icon">
+          <svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        </div>
+        <div class="empty-title">Upload a product file to start</div>
+        <div class="empty-sub">Drop your spreadsheet or click to browse. Supports .xlsx, .xls, .csv</div>
+
+        <div class="upload-area" id="uploadArea">
+          <input type="file" id="fileInput" accept=".xlsx,.xls,.csv" />
+          <svg viewBox="0 0 24 24" style="width:20px;height:20px;fill:none;stroke:var(--accent);stroke-width:1.5"><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          <div class="upload-label">Choose a file or drag it here</div>
+          <div class="upload-hint">.xlsx · .xls · .csv — up to 100MB</div>
+        </div>
+
+        <div class="upload-progress" id="uploadProgress">
+          <div class="progress-track"><div class="progress-fill ok" id="progressFill"></div></div>
+          <div class="progress-status" id="progressStatus">Uploading…</div>
+        </div>
+      </div>
+
+      <!-- Messages -->
+      <div id="messages"></div>
+
     </div>
   </div>
 
-  <!-- STATUS BAR -->
-  <div class="status-bar" id="statusBar"></div>
+  <!-- ─── Input ─── -->
+  <div class="input-area hidden" id="inputArea">
+    <div class="input-inner">
+      <div class="quick-actions" id="quickActions">
+        <button class="quick-btn" data-prompt="List all columns and their detected data types">📋 List columns</button>
+        <button class="quick-btn" data-prompt="Find categories using CATEGORY1, CATEGORY2, CATEGORY3, CATEGORY4">🏷️ Find categories</button>
+        <button class="quick-btn" data-prompt="Map all attributes to PIM fields">🔗 Map attributes</button>
+        <button class="quick-btn" data-prompt="Generate the final PIM templates">📦 Generate output</button>
+      </div>
+
+      <div class="input-box">
+        <textarea class="input-textarea" id="msgInput" placeholder="Ask the agent…" rows="1"></textarea>
+        <div class="input-actions-col">
+          <button class="attach-btn" id="attachBtn" title="Attach file">
+            <svg viewBox="0 0 24 24"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+            <input type="file" id="attachInput" accept=".xlsx,.xls,.csv" />
+          </button>
+          <button class="send-btn" id="sendBtn" disabled>
+            <svg viewBox="0 0 24 24"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="input-footer">
+        <div class="input-footer-left">
+          <svg viewBox="0 0 24 24" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+          <span>May produce errors. Verify before import.</span>
+        </div>
+      </div>
+    </div>
+  </div>
 
 </div>
 
+<!-- ─── Sessions Drawer ─── -->
+<div class="sessions-overlay" id="sessionsOverlay"></div>
+<div class="sessions-drawer" id="sessionsDrawer">
+  <div class="drawer-header">
+    <div class="drawer-title">Sessions</div>
+    <button class="drawer-close" id="drawerClose">
+      <svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+    </button>
+  </div>
+  <div class="drawer-list" id="drawerList"></div>
+  <div class="drawer-footer">
+    <div class="drawer-avatar">U</div>
+    <div class="drawer-user-info">
+      <div class="drawer-user-name">User</div>
+      <div class="drawer-user-plan">PIM Agent</div>
+    </div>
+  </div>
+</div>
+
 <script>
-// ─── STATE ─────────────────────────────────────────
-const STATE = {
+// ═══════════════════════════════════════════════════════════
+//  State
+// ═══════════════════════════════════════════════════════════
+const state = {
   threadId: null,
-  currentPhase: null,
-  phasesCompleted: [],
+  filePath: null,
+  filename: null,
   isStreaming: false,
-  isAwaitingFeedback: false,
-  conversation: [],
+  turnCount: 0,
+  toolCallCount: 0,
+  sessions: JSON.parse(localStorage.getItem('pim_sessions') || '[]'),
 };
 
-// ─── DOM REFS ─────────────────────────────────────
-const chatFeed = document.getElementById('chatFeed');
-const chatInput = document.getElementById('chatInput');
-const sendBtn = document.getElementById('sendBtn');
-const statusBar = document.getElementById('statusBar');
-const phaseIndicator = document.getElementById('phaseIndicator');
+const BASE = window.location.origin;
 
-// ─── UTILITY ──────────────────────────────────────
-function scrollToBottom() {
-  setTimeout(() => { chatFeed.scrollTop = chatFeed.scrollHeight; }, 50);
-}
+// ═══════════════════════════════════════════════════════════
+//  DOM refs
+// ═══════════════════════════════════════════════════════════
+const $ = id => document.getElementById(id);
+const chatInner       = $('chatInner');
+const emptyState      = $('emptyState');
+const uploadArea      = $('uploadArea');
+const fileInput       = $('fileInput');
+const uploadProgress  = $('uploadProgress');
+const progressFill    = $('progressFill');
+const progressStatus  = $('progressStatus');
+const messages        = $('messages');
+const inputArea       = $('inputArea');
+const msgInput        = $('msgInput');
+const sendBtn         = $('sendBtn');
+const headerFile      = $('headerFile');
+const headerFilename  = $('headerFilename');
+const statusDot       = $('statusDot');
+const quickActions    = $('quickActions');
 
-function status(msg, isError = false) {
-  statusBar.textContent = msg;
-  statusBar.className = 'status-bar show' + (isError ? ' error' : '');
-}
-
-function setInputEnabled(enabled) {
-  chatInput.disabled = !enabled;
-  sendBtn.disabled = !enabled;
-  chatInput.placeholder = enabled
-    ? 'Type your response or file path...'
-    : 'Processing...';
-}
-
-function addMessage(role, html, extra) {
-  const div = document.createElement('div');
-  div.className = 'message';
-  div.innerHTML = `
-    <div class="message-inner">
-      <div class="avatar ${role === 'ai' ? 'ai-avatar' : 'user-avatar'}">
-        ${role === 'ai' ? 'AI' : 'U'}
-      </div>
-      <div class="content">
-        <div class="role">${role === 'ai' ? 'VinAI Assistant' : 'You'}</div>
-        <div class="bubble">${html}</div>
-        ${extra || ''}
-      </div>
-    </div>
-  `;
-  chatFeed.appendChild(div);
-  scrollToBottom();
-  STATE.conversation.push({ role, html, extra });
-  return div;
-}
-
-function addProgress(text) {
-  const div = document.createElement('div');
-  div.className = 'message';
-  div.innerHTML = `
-    <div class="message-inner">
-      <div class="avatar ai-avatar">AI</div>
-      <div class="content">
-        <div class="progress-card">
-          <div class="progress-spinner"></div>
-          <div class="progress-text">${text}</div>
-        </div>
-      </div>
-    </div>
-  `;
-  chatFeed.appendChild(div);
-  scrollToBottom();
-  return div;
-}
-
-function addBackgroundIndicator(text) {
-  const existing = document.getElementById('bgIndicator');
-  if (existing) existing.remove();
-  const div = document.createElement('div');
-  div.id = 'bgIndicator';
-  div.className = 'message';
-  div.innerHTML = `
-    <div class="message-inner">
-      <div class="avatar ai-avatar">AI</div>
-      <div class="content">
-        <div class="progress-card" style="border-left:3px solid var(--amber);">
-          <div class="progress-spinner"></div>
-          <div class="progress-text"><strong>Processing in background</strong><br>${text}</div>
-        </div>
-      </div>
-    </div>
-  `;
-  chatFeed.appendChild(div);
-  scrollToBottom();
-}
-
-function removeBackgroundIndicator() {
-  const el = document.getElementById('bgIndicator');
-  if (el) el.remove();
-}
-
-function removeProgress() {
-  const msgs = chatFeed.querySelectorAll('.message');
-  for (const m of msgs) {
-    if (m.querySelector('.progress-card')) {
-      m.remove();
-      break;
-    }
+// ═══════════════════════════════════════════════════════════
+//  Sessions Drawer
+// ═══════════════════════════════════════════════════════════
+function renderDrawer() {
+  const list = $('drawerList');
+  list.innerHTML = '';
+  if (!state.sessions.length) {
+    list.innerHTML = '<div style="padding:14px;font-size:13px;color:var(--text-muted)">No sessions yet</div>';
+    return;
   }
+  [...state.sessions].reverse().forEach(s => {
+    const el = document.createElement('div');
+    el.className = 'drawer-item' + (s.threadId === state.threadId ? ' active' : '');
+    el.innerHTML = `
+      <div class="drawer-item-name">${escHtml(s.filename || 'Unknown')}</div>
+      <div class="drawer-item-meta">
+        <span>${new Date(s.ts).toLocaleDateString(undefined,{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'})}</span>
+        <span class="drawer-item-badge">${s.status}</span>
+      </div>`;
+    el.addEventListener('click', () => { closeDrawer(); restoreSession(s); });
+    list.appendChild(el);
+  });
 }
 
-// ─── SUGGESTION RENDERERS ─────────────────────────
-
-function renderSuggestions(suggestions) {
-  if (!suggestions || !suggestions.length) return '';
-
-  let html = '<div class="suggestion-group">';
-  const hasGroups = suggestions.some(s => s.type === 'group');
-
-  if (hasGroups) {
-    for (const group of suggestions) {
-      html += `<div class="group-header">${group.label || 'Suggestions'}</div>`;
-      if (group.items) {
-        for (const item of group.items) {
-          html += renderSuggestionItem(item);
-        }
-      }
-    }
-  } else {
-    for (const item of suggestions) {
-      html += renderSuggestionItem(item);
-    }
-  }
-
-  html += '</div>';
-  return html;
+function saveSession(status='active') {
+  const idx = state.sessions.findIndex(s => s.threadId === state.threadId);
+  const rec = { threadId: state.threadId, filePath: state.filePath, filename: state.filename, ts: Date.now(), status };
+  if (idx >= 0) state.sessions[idx] = rec; else state.sessions.push(rec);
+  localStorage.setItem('pim_sessions', JSON.stringify(state.sessions));
+  renderDrawer();
 }
 
-function renderSuggestionItem(item) {
-  if (item.type === 'group') {
-    let g = `<div class="group-header">${item.label || 'Group'}</div>`;
-    if (item.items) {
-      for (const sub of item.items) {
-        g += renderSuggestionItem(sub);
-      }
-    }
-    return g;
-  }
-
-  const conf = item.confidence || 0;
-  const confClass = conf >= 80 ? 'conf-high' : 'conf-low';
-  const mappedTo = item.mapped_to || '';
-  const column = item.column || '';
-
-  if (!column && !item.mapped_to && item.label) {
-    return `
-      <div class="suggestion-item ${confClass}">
-        <span class="col-name">${item.label}</span>
-        ${item.column_hint ? `<span class="reason">(from ${item.column_hint})</span>` : ''}
-        <span class="conf-badge">${conf}%</span>
-      </div>
-    `;
-  }
-
-  return `
-    <div class="suggestion-item ${confClass}">
-      <span class="col-name">${column || '—'}</span>
-      ${mappedTo ? `<span class="arrow">→</span><span class="mapped-to">${mappedTo}</span>` : ''}
-      <span class="conf-badge">${conf}%</span>
-      ${item.reasoning ? `<div class="reason">${item.reasoning}</div>` : ''}
-    </div>
-  `;
+function restoreSession(s) {
+  state.threadId = s.threadId;
+  state.filePath  = s.filePath;
+  state.filename  = s.filename;
+  headerFilename.textContent = s.filename || '—';
+  headerFile.style.display = 'flex';
+  emptyState.classList.add('hidden');
+  messages.classList.remove('hidden');
+  inputArea.classList.remove('hidden');
+  setStatus('ready');
+  renderDrawer();
+  // Show a restore notice
+  addSystemNote(`Resumed session: ${escHtml(s.filename)}`);
+  // In a real app: fetch history via /interactive/status and render past messages
 }
 
-function renderReferenceItems(suggestions) {
-  if (!suggestions || !suggestions.length) return '';
-  let html = '<div class="suggestion-group">';
-  for (const ref of suggestions) {
-    const vals = ref.values || [];
-    const messy = ref.messy_values || [];
+function openDrawer() {
+  $('sessionsOverlay').classList.add('open');
+  $('sessionsDrawer').classList.add('open');
+}
+function closeDrawer() {
+  $('sessionsOverlay').classList.remove('open');
+  $('sessionsDrawer').classList.remove('open');
+}
+$('menuBtn').addEventListener('click', openDrawer);
+$('sessionsOverlay').addEventListener('click', closeDrawer);
+$('drawerClose').addEventListener('click', closeDrawer);
 
-    html += `<div class="ref-item">
-      <div class="ref-header">
-        <span>${ref.label || ref.column || '—'}</span>
-        <span style="font-weight:400;color:var(--muted);font-size:12px;">${ref.unique_count || vals.length} unique</span>
-      </div>
-      <div class="ref-values">`;
+$('newBtn').addEventListener('click', resetSession);
 
-    for (const v of vals) {
-      const isMessy = messy.includes(v);
-      html += `<span class="ref-tag ${isMessy ? 'messy' : ''}">${v}</span>`;
-    }
-
-    html += `</div></div>`;
-  }
-  html += '</div>';
-  return html;
+function resetSession() {
+  state.threadId = null;
+  state.filePath  = null;
+  state.filename  = null;
+  messages.innerHTML = '';
+  emptyState.classList.remove('hidden');
+  messages.classList.add('hidden');
+  inputArea.classList.add('hidden');
+  headerFile.style.display = 'none';
+  state.turnCount = 0;
+  state.toolCallCount = 0;
+  setStatus('idle');
+  closeDrawer();
+  renderDrawer();
 }
 
-function renderPhaseText(phase, explanation, suggestions, reasoning, sampleData) {
-  let text = explanation || '';
+// ═══════════════════════════════════════════════════════════
+//  Upload
+// ═══════════════════════════════════════════════════════════
+uploadArea.addEventListener('dragover', e => { e.preventDefault(); uploadArea.classList.add('drag-over'); });
+uploadArea.addEventListener('dragleave', () => uploadArea.classList.remove('drag-over'));
+uploadArea.addEventListener('drop', e => {
+  e.preventDefault(); uploadArea.classList.remove('drag-over');
+  if (e.dataTransfer.files[0]) handleUpload(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener('change', () => { if (fileInput.files[0]) handleUpload(fileInput.files[0]); });
 
-  if (suggestions && suggestions.length) {
-    text += '\n\n' + formatSuggestions(suggestions, phase);
-  }
+async function handleUpload(file) {
+  uploadProgress.classList.add('visible');
+  progressFill.style.width = '0%';
+  progressFill.className = 'progress-fill ok';
+  progressStatus.textContent = `Uploading ${file.name}…`;
 
-  if (sampleData && sampleData.length) {
-    text += '\n\n<details style=\"margin-top:8px;font-size:13px;\"><summary style=\"color:var(--muted);cursor:pointer;\">Show sample data</summary><pre style=\"margin-top:6px;background:var(--bg);padding:10px;border-radius:6px;font-size:12px;overflow-x:auto;\">' + escapeHtml(JSON.stringify(sampleData, null, 2)) + '</pre></details>';
-  }
+  let pct = 0;
+  const ticker = setInterval(() => {
+    pct = Math.min(pct + Math.random() * 10, 85);
+    progressFill.style.width = pct + '%';
+  }, 100);
 
-  if (reasoning) {
-    text += '\n\n<details style=\"margin-top:4px;font-size:12px;\"><summary style=\"color:var(--muted);cursor:pointer;\">Why I chose this</summary><div style=\"margin-top:4px;color:var(--muted);line-height:1.6;\">' + reasoning + '</div></details>';
-  }
+  const fd = new FormData();
+  fd.append('file', file);
 
-  text += '\n\n<em style=\"color:var(--muted);font-size:13px;\">Let me know if this looks right, or tell me what to change.</em>';
-  return text;
-}
-
-function formatSuggestions(suggestions, phase) {
-  let lines = [];
-  for (const s of suggestions) {
-    if (s.type === 'group' && s.label && s.items) {
-      lines.push('**' + s.label + '**');
-      for (const item of s.items) {
-        const col = item.column || '';
-        const mapped = item.mapped_to || '';
-        const conf = item.confidence || 0;
-        if (col && mapped) {
-          lines.push('- ' + col + ' \u2192 ' + mapped + ' (' + conf + '%)' + (item.attribute_group ? ' [' + item.attribute_group + ']' : ''));
-        } else if (item.label) {
-          lines.push('- ' + item.label);
-        }
-        if (item.reasoning && item.confidence < 80) {
-          lines.push('  *' + item.reasoning + '*');
-        }
-      }
-    } else if (s.label) {
-      lines.push('- ' + s.label + (s.unique_count ? ' (' + s.unique_count + ' values)' : ''));
-      if (s.messy_values && s.messy_values.length) {
-        lines.push('  \u26a0 Messy: ' + s.messy_values.join(', '));
-      }
-      if (s.normalizations && s.normalizations.length) {
-        lines.push('  \u2705 Normalize: ' + s.normalizations.map(function(n) { return typeof n === 'string' ? n : n.original + ' \u2192 ' + n.normalized; }).join(', '));
-      }
-    }
-  }
-  if (lines.length <= 10) {
-    return lines.join('\n');
-  }
-  var first = lines.slice(0, 5).join('\n');
-  var rest = lines.slice(5).join('\n');
-  return first + '\n<details style="margin-top:4px;font-size:13px;"><summary style="cursor:pointer;color:var(--muted);">+' + (lines.length - 5) + ' more</summary><div style="margin-top:4px;">' + rest + '</div></details>';
-}
-
-function escapeHtml(str) {
-  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
-
-function renderDownloadText(files) {
-  if (!files || !files.length) return '';
-  let text = 'Generated **' + files.length + '** PIM template files:\n';
-  for (const f of files) {
-    const name = f.split('/').pop() || f;
-    text += '\n- \u{1F4C4} [' + name + '](/output/' + name + ')';
-  }
-  return text;
-}
-
-function renderExportUI(threadId) {
-  return '\n\n<details style="margin-top:12px;"><summary style="cursor:pointer;color:var(--purple);font-weight:600;">\u{1F4E4} Export to marketplace</summary>'
-    + '<div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">'
-    + '<select id="exportPlatform" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px;font-family:inherit;">'
-    + '<option value="Shopify">Shopify</option>'
-    + '<option value="Myntra">Myntra</option>'
-    + '</select>'
-    + '<button class="btn btn-primary" style="font-size:12px;padding:6px 14px;" onclick="handleExport(\'' + threadId + '\')">Export</button>'
-    + '<span id="exportStatus" style="font-size:12px;color:var(--muted);"></span>'
-    + '</div></details>';
-}
-
-async function handleExport(threadId) {
-  const platform = document.getElementById('exportPlatform').value;
-  const statusEl = document.getElementById('exportStatus');
-  statusEl.textContent = 'Exporting...';
   try {
-    const resp = await fetch('/interactive/export', {
+    const res = await fetch(`${BASE}/upload`, { method: 'POST', body: fd });
+    const data = await res.json();
+    clearInterval(ticker);
+    progressFill.style.width = '100%';
+    progressStatus.textContent = 'Processing…';
+    state.filePath = data.path;
+    state.filename = data.filename;
+    setTimeout(startSession, 400);
+  } catch(e) {
+    clearInterval(ticker);
+    progressFill.className = 'progress-fill err';
+    progressStatus.textContent = 'Upload failed: ' + e.message;
+  }
+}
+
+async function startSession() {
+  headerFilename.textContent = state.filename;
+  headerFile.style.display = 'flex';
+  emptyState.classList.add('hidden');
+  messages.classList.remove('hidden');
+  inputArea.classList.remove('hidden');
+  setStatus('running');
+  msgInput.focus();
+
+  const tid = showThinking();
+
+  try {
+    const res = await fetch(`${BASE}/interactive/start`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ thread_id: threadId, target_platform: platform }),
+      body: JSON.stringify({ file_path: state.filePath }),
     });
-    const result = await resp.json();
-    if (result.status === 'success') {
-      const name = result.filename;
-      statusEl.innerHTML = ' \u2705 <a href="/output/' + name + '" download style="color:var(--purple);">Download ' + platform + ' export</a>';
-    } else {
-      statusEl.textContent = ' Export failed';
-    }
-  } catch (err) {
-    statusEl.textContent = ' Error: ' + err.message;
+    hideThinking(tid);
+    await consumeSSE(res, true);
+  } catch(e) {
+    hideThinking(tid);
+    showError('Failed to start: ' + e.message);
+    setStatus('idle');
   }
 }
 
-// ─── START ONBOARDING (SSE) ───────────────────────
+// ═══════════════════════════════════════════════════════════
+//  SSE
+// ═══════════════════════════════════════════════════════════
+async function consumeSSE(response, isStart) {
+  const reader = response.body.getReader();
+  const dec = new TextDecoder();
+  let buf = '';
+  let bubble = null;
 
-function startOnboarding(filePath, sheetName) {
-  STATE.isStreaming = true;
-  setInputEnabled(false);
-  status('Starting onboarding...');
+  state.isStreaming = true;
+  sendBtn.disabled = true;
+  setStatus('running');
 
-  addMessage('user', `Onboarding file: <strong>${filePath}</strong>${sheetName ? ` (sheet: ${sheetName})` : ''}`);
-
-  fetch('/interactive/start', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ file_path: filePath, sheet_name: sheetName || null }),
-  }).then(async (response) => {
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-
+  try {
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
+      buf += dec.decode(value, { stream: true });
 
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
+      const lines = buf.split('\n');
+      buf = lines.pop();
 
       for (const line of lines) {
         if (!line.startsWith('data: ')) continue;
-        const data = JSON.parse(line.slice(6));
+        const raw = line.slice(6).trim();
+        if (!raw) continue;
+        let evt;
+        try { evt = JSON.parse(raw); } catch { continue; }
 
-        if (data.type === 'background') {
-          removeProgress();
-          addBackgroundIndicator(data.message);
-        } else if (data.type === 'progress') {
-          removeProgress();
-          removeBackgroundIndicator();
-          addProgress(data.message);
-          if (data.details) {
-            phaseIndicator.textContent = `${data.details.columns} cols · ${data.details.rows} rows`;
-          }
-        } else if (data.type === 'phase') {
-          removeProgress();
-          STATE.threadId = data.thread_id;
-          STATE.currentPhase = data.phase;
-          STATE.isStreaming = false;
+        switch (evt.type) {
+          case 'tool_start':
+            state.toolCallCount++;
+            if (!bubble) bubble = createBubble();
+            addToolLine(bubble, evt.tool, 'running', evt.input);
+            setStatus('running');
+            break;
 
-          addMessage('ai', renderPhaseText(
-            data.phase,
-            data.message || data.explanation,
-            data.suggestions,
-            data.reasoning,
-            data.details || null,
-          ));
+          case 'tool_end':
+            if (!bubble) bubble = createBubble();
+            addToolLine(bubble, evt.tool, 'done', evt.output_preview);
+            break;
 
-          phaseIndicator.textContent = data.phase ? 'Phase: ' + data.phase : '';
-          STATE.isAwaitingFeedback = true;
-          setInputEnabled(true);
-          status('');
-          chatInput.focus();
+          case 'progress':
+            if (!bubble) bubble = createBubble();
+            appendText(bubble, evt.message, true);
+            break;
+
+          case 'complete':
+            if (isStart) state.threadId = evt.thread_id;
+            if (bubble) finalizeBubble(bubble, evt.generated_files);
+            else if (evt.message) {
+              bubble = createBubble();
+              appendText(bubble, evt.message, false);
+              finalizeBubble(bubble, evt.generated_files);
+            }
+            state.turnCount++;
+            setStatus('ready');
+            saveSession('active');
+            msgInput.disabled = false;
+            break;
         }
       }
     }
-  }).catch(err => {
-    removeProgress();
-    status('Connection error: ' + err.message, true);
-    STATE.isStreaming = false;
-    setInputEnabled(true);
-  });
+  } finally {
+    state.isStreaming = false;
+    sendBtn.disabled = false;
+    msgInput.focus();
+    checkInput();
+  }
 }
 
-// ─── APPROVE / REJECT ─────────────────────────────
+// ═══════════════════════════════════════════════════════════
+//  Send
+// ═══════════════════════════════════════════════════════════
+async function sendMessage() {
+  const text = msgInput.value.trim();
+  if (!text || state.isStreaming || !state.threadId) return;
 
-async function approvePhase(approved, feedback) {
-  if (!STATE.threadId || !STATE.currentPhase) return;
+  addUserMsg(text);
+  msgInput.value = '';
+  msgInput.style.height = '';
+  sendBtn.disabled = true;
 
-  feedback = feedback || '';
-  STATE.isAwaitingFeedback = false;
-  STATE.isStreaming = true;
-  setInputEnabled(false);
-  status(approved ? 'Processing...' : 'Applying feedback...');
+  const tid = showThinking();
 
   try {
-    const resp = await fetch('/interactive/respond', {
+    const res = await fetch(`${BASE}/interactive/respond`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        thread_id: STATE.threadId,
-        approved: approved,
-        feedback: feedback,
-      }),
+      body: JSON.stringify({ thread_id: state.threadId, message: text }),
     });
-
-    const result = await resp.json();
-
-    if (result.status === 'complete') {
-      STATE.currentPhase = 'complete';
-      addMessage('ai', (result.message || 'All done!') + '\n\n' + renderDownloadText(result.generated_files || []) + renderExportUI(STATE.threadId));
-      phaseIndicator.textContent = 'Complete';
-      status('');
-      setInputEnabled(true);
-    } else if (result.status === 'continue') {
-      STATE.currentPhase = result.phase;
-      STATE.phasesCompleted.push(result.phase);
-
-      addMessage('ai', renderPhaseText(
-        result.phase,
-        result.message || result.explanation,
-        result.suggestions,
-        result.reasoning,
-        null,
-      ));
-
-      phaseIndicator.textContent = result.phase ? 'Phase: ' + result.phase : '';
-      STATE.isAwaitingFeedback = true;
-      setInputEnabled(true);
-      status('');
-      chatInput.focus();
-    } else {
-      status('Unexpected response', true);
-      setInputEnabled(true);
-    }
-  } catch (err) {
-    status('Error: ' + err.message, true);
-    setInputEnabled(true);
+    hideThinking(tid);
+    await consumeSSE(res, false);
+  } catch(e) {
+    hideThinking(tid);
+    showError('Connection error: ' + e.message);
+    setStatus('idle');
+    sendBtn.disabled = false;
   }
-
-  STATE.isStreaming = false;
 }
 
-// ─── FILE SELECTION ────────────────────────────────
+sendBtn.addEventListener('click', sendMessage);
+msgInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+});
+msgInput.addEventListener('input', () => {
+  msgInput.style.height = 'auto';
+  msgInput.style.height = Math.min(msgInput.scrollHeight, 200) + 'px';
+  checkInput();
+});
+function checkInput() { sendBtn.disabled = !msgInput.value.trim() || state.isStreaming; }
 
-function showFilePicker() {
-  addMessage('ai', `
-    Hi! I'm ready to help you onboard your product data into the PIM.
+// Quick actions
+document.querySelectorAll('.quick-btn').forEach(el => {
+  el.addEventListener('click', () => {
+    msgInput.value = el.dataset.prompt;
+    msgInput.dispatchEvent(new Event('input'));
+    msgInput.focus();
+  });
+});
 
-    <p>We'll work through <strong>4 steps</strong> together:</p>
-    <p>
-    1. <strong>Categories</strong> — I will discover your product hierarchy<br>
-    2. <strong>Attributes</strong> — I will map your columns to PIM fields<br>
-    3. <strong>Reference Masters</strong> — I will extract dropdown values<br>
-    4. <strong>Products</strong> — I will compile the final template
-    </p>
-    <p>Just tell me the path to your data file to get started!</p>
-  `);
+// Attach file in input area (re-upload shortcut)
+$('attachBtn').addEventListener('click', () => $('attachInput').click());
+$('attachInput').addEventListener('change', () => {
+  if ($('attachInput').files[0]) {
+    resetSession();
+    handleUpload($('attachInput').files[0]);
+  }
+});
 
-  const fileCard = document.createElement('div');
-  fileCard.className = 'message';
-  fileCard.innerHTML = `
-    <div class="message-inner">
-      <div class="avatar user-avatar">U</div>
-      <div class="content">
-        <div class="upload-zone" onclick="document.getElementById('fileInput').click()">
-          <div class="upload-icon">+</div>
-          <div class="upload-title">Click to select a file</div>
-          <div class="upload-sub">Or type the server path below</div>
-          <input type="file" id="fileInput" style="display:none" accept=".csv,.xlsx,.xls" />
-          <div style="margin-top:12px;display:flex;gap:8px;max-width:500px;margin-left:auto;margin-right:auto;">
-            <input type="text" id="filePathInput" placeholder="e.g. /data/export.xlsx" style="flex:1;padding:8px 12px;border:1px solid var(--border);border-radius:8px;font-size:13px;font-family:inherit;outline:none;" />
-            <button class="btn btn-primary" onclick="handleFileSubmit()">Start</button>
-          </div>
-        </div>
-      </div>
+// ═══════════════════════════════════════════════════════════
+//  Bubble builders
+// ═══════════════════════════════════════════════════════════
+function timeStr() {
+  return new Date().toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+}
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function md(s) {
+  return escHtml(s).replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>').replace(/`([^`]+)`/g, '<code>$1</code>');
+}
+
+function scrollBottom() {
+  requestAnimationFrame(() => { $('chat').scrollTop = $('chat').scrollHeight; });
+}
+
+function addUserMsg(text) {
+  const div = document.createElement('div');
+  div.className = 'msg';
+  div.innerHTML = `
+    <div class="msg-header">
+      <div class="msg-avatar you">U</div>
+      <span class="msg-author">You</span>
+      <span class="msg-time">${timeStr()}</span>
     </div>
-  `;
-  chatFeed.appendChild(fileCard);
-  scrollToBottom();
-
-  document.getElementById('fileInput').addEventListener('change', async (e) => {
-    if (e.target.files.length) {
-      const file = e.target.files[0];
-      document.getElementById('filePathInput').value = 'Uploading ' + file.name + '...';
-      const form = new FormData();
-      form.append('file', file);
-      try {
-        const resp = await fetch('/upload', { method: 'POST', body: form });
-        const result = await resp.json();
-        document.getElementById('filePathInput').value = result.path;
-        document.querySelector('.upload-sub').textContent = 'File uploaded';
-      } catch (err) {
-        document.getElementById('filePathInput').value = file.name;
-        document.querySelector('.upload-sub').textContent = 'Upload failed, type path instead';
-      }
-    }
-  });
+    <div class="msg-content">${md(text)}</div>`;
+  messages.appendChild(div);
+  scrollBottom();
+  return div;
 }
 
-function handleFileSubmit() {
-  const pathInput = document.getElementById('filePathInput');
-  const path = pathInput ? pathInput.value.trim() : '';
-  if (!path) {
-    status('Please enter a file path', true);
-    return;
-  }
-
-  const pickerCard = document.querySelector('.upload-zone')?.closest('.message');
-  if (pickerCard) pickerCard.remove();
-
-  const greeting = chatFeed.querySelector('.message:first-child .bubble');
-  if (greeting && greeting.textContent.includes('ready to help')) {
-    // Keep the greeting, remove the picker
-  }
-
-  startOnboarding(path, '');
+function createBubble() {
+  const div = document.createElement('div');
+  div.className = 'msg';
+  div.innerHTML = `
+    <div class="msg-header">
+      <div class="msg-avatar ai">AI</div>
+      <span class="msg-author">PIM Agent</span>
+      <span class="msg-time">${timeStr()}</span>
+    </div>
+    <div class="msg-content streaming-cursor"></div>`;
+  messages.appendChild(div);
+  scrollBottom();
+  return div;
 }
 
-// ─── CHAT INPUT ────────────────────────────────────
-
-chatInput.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && !e.shiftKey) {
-    e.preventDefault();
-    handleChatSend();
+function appendText(bubble, token, streaming) {
+  const content = bubble.querySelector('.msg-content');
+  if (streaming) {
+    content.classList.add('streaming-cursor');
+    content.innerHTML += escHtml(token);
+  } else {
+    content.innerHTML = md(token);
   }
-});
-
-sendBtn.addEventListener('click', handleChatSend);
-
-function handleChatSend() {
-  const text = chatInput.value.trim();
-  if (!text) return;
-
-  if (STATE.isAwaitingFeedback) {
-    const affirmWords = ['yes', 'looks good', 'correct', 'fine', 'proceed', 'approve', '\u2713', 'looks right', 'go ahead'];
-    const isAffirm = affirmWords.some(w => text.toLowerCase().includes(w));
-    if (isAffirm) {
-      addMessage('user', '\u2713 Looks good');
-      approvePhase(true, '');
-    } else {
-      addMessage('user', text);
-      approvePhase(false, text);
-    }
-    chatInput.value = '';
-    return;
-  }
-
-  if (!STATE.threadId) {
-    if (text.includes('.') || text.includes('/') || text.includes('\\')) {
-      document.getElementById('filePathInput').value = text;
-      handleFileSubmit();
-    } else {
-      addMessage('user', text);
-      addMessage('ai', 'I need a file path to get started. Please provide the path to your CSV or XLSX file.');
-    }
-    chatInput.value = '';
-    return;
-  }
-
-  addMessage('user', text);
-  chatInput.value = '';
-
-  const fb = document.getElementById('feedbackInput');
-  if (fb && STATE.isAwaitingFeedback) {
-    fb.value = text;
-  }
+  scrollBottom();
 }
 
-// ─── RESET ─────────────────────────────────────────
-
-function resetChat() {
-  STATE.threadId = null;
-  STATE.currentPhase = null;
-  STATE.phasesCompleted = [];
-  STATE.isStreaming = false;
-  STATE.isAwaitingFeedback = false;
-  STATE.conversation = [];
-
-  chatFeed.innerHTML = '';
-  phaseIndicator.textContent = '';
-  status('');
-  setInputEnabled(false);
-
-  showFilePicker();
+function addToolLine(bubble, tool, status, detail) {
+  const content = bubble.querySelector('.msg-content');
+  const dot = status === 'running' ? '🔄' : status === 'done' ? '✅' : '❌';
+  const line = document.createElement('div');
+  line.className = 'tool-line';
+  line.innerHTML = `${dot} ${tool}`;
+  content.appendChild(line);
+  scrollBottom();
 }
 
-// ─── INIT ──────────────────────────────────────────
+function finalizeBubble(bubble, files) {
+  const content = bubble.querySelector('.msg-content');
+  content.classList.remove('streaming-cursor');
+  const raw = content.innerText || content.textContent;
+  content.innerHTML = md(raw);
 
-document.addEventListener('DOMContentLoaded', () => {
-  chatInput.addEventListener('input', () => {
-    chatInput.style.height = 'auto';
-    chatInput.style.height = Math.min(chatInput.scrollHeight, 120) + 'px';
-  });
+  if (files && files.length) {
+    const cards = document.createElement('div');
+    cards.className = 'file-cards';
+    files.forEach(f => {
+      const fname = f.split('/').pop();
+      cards.innerHTML += `
+        <a href="${BASE}/${f}" download class="file-card">
+          <svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+          <span class="file-card-name">${escHtml(fname)}</span>
+          <span class="file-card-dl">↓</span>
+        </a>`;
+    });
+    bubble.querySelector('.msg-content').appendChild(cards);
+  }
+  scrollBottom();
+}
 
-  showFilePicker();
-});
+function showError(msg) {
+  const div = document.createElement('div');
+  div.className = 'msg error';
+  div.innerHTML = `
+    <div class="msg-header">
+      <div class="msg-avatar ai">!</div>
+      <span class="msg-author">Error</span>
+      <span class="msg-time">${timeStr()}</span>
+    </div>
+    <div class="msg-content">${escHtml(msg)}</div>`;
+  messages.appendChild(div);
+  scrollBottom();
+}
+
+function addSystemNote(msg) {
+  const div = document.createElement('div');
+  div.style.cssText = 'padding:10px 2px;font-size:13px;color:var(--text-muted);border-bottom:1px solid var(--border-light)';
+  div.textContent = msg;
+  messages.appendChild(div);
+  scrollBottom();
+}
+
+let thinkingId = 0;
+function showThinking() {
+  const id = 'think-' + (++thinkingId);
+  const div = document.createElement('div');
+  div.className = 'thinking'; div.id = id;
+  div.innerHTML = `<div class="thinking-dots"><span></span><span></span><span></span></div><span>Thinking…</span>`;
+  messages.appendChild(div);
+  scrollBottom();
+  return id;
+}
+function hideThinking(id) { document.getElementById(id)?.remove(); }
+
+// ═══════════════════════════════════════════════════════════
+//  Status
+// ═══════════════════════════════════════════════════════════
+function setStatus(type) {
+  statusDot.className = 'status-dot';
+  if (type === 'ready')   statusDot.classList.add('dot-ready');
+  else if (type === 'running') statusDot.classList.add('dot-running');
+  else                    statusDot.classList.add('dot-idle');
+}
+
+// ═══════════════════════════════════════════════════════════
+//  Init
+// ═══════════════════════════════════════════════════════════
+renderDrawer();
+
+// Restore last session on load if exists
+if (state.sessions.length > 0) {
+  const last = state.sessions[state.sessions.length - 1];
+  if (last.status === 'active') {
+    restoreSession(last);
+  }
+}
 </script>
-
 </body>
 </html>
