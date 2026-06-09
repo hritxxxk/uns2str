@@ -125,37 +125,43 @@ def render_all_templates(fingerprint: str, category_hierarchy: list, attribute_d
 
 @tool
 def render_product_xlsx(rows: list[dict], attr_names: list[str]) -> Workbook:
-    """Generate product master workbook.
-    
-    6 fixed columns (Category Path, Variant Attributes, Parent SKU, Code, sku_name, mrp)
-    + dynamic attribute columns + 9 image columns."""
-    wb = Workbook()
-    ws = wb.active
-    ws["A1"] = "Category Path"
-    ws["B1"] = "Variant Attributes"
-    ws["C1"] = "Parent SKU"
-    ws["D1"] = "Code"
-    ws["E1"] = "sku_name"
-    ws["F1"] = "mrp"
+    """Generate product master workbook using write_only mode.
 
-    for i, name in enumerate(attr_names, 7):
-        ws.cell(row=1, column=i, value=name)
+    6 fixed columns + N dynamic attribute columns + 9 image columns.
+    Writes rows in batches of 1000 to keep memory flat for large files."""
+    from openpyxl import Workbook
+    wb = Workbook(write_only=True)
+    ws = wb.create_sheet()
 
-    for i in range(1, 10):
-        ws.cell(row=1, column=6 + len(attr_names) + i, value=f"image_{i}")
+    headers = (
+        ["Category Path", "Variant Attributes", "Parent SKU", "Code", "sku_name", "mrp"]
+        + attr_names
+        + [f"image_{i}" for i in range(1, 10)]
+    )
+    ws.append(headers)
 
+    batch = []
     for ri, record in enumerate(rows, 2):
-        ws.cell(row=ri, column=1, value=record.get("category_path"))
-        ws.cell(row=ri, column=4, value=record.get("code"))
-        ws.cell(row=ri, column=5, value=record.get("sku_name"))
-        ws.cell(row=ri, column=6, value=record.get("mrp"))
-
-        for ci, name in enumerate(attr_names, 7):
-            ws.cell(row=ri, column=ci, value=record.get(name))
-
+        row = [
+            record.get("category_path", ""),
+            record.get("variant_attributes", ""),
+            record.get("parent_sku", ""),
+            record.get("code", ""),
+            record.get("sku_name", ""),
+            record.get("mrp", ""),
+        ]
+        for name in attr_names:
+            row.append(record.get(name, ""))
         for ii in range(1, 10):
-            key = f"image_{ii}"
-            if key in record:
-                ws.cell(row=ri, column=6 + len(attr_names) + ii, value=record[key])
+            row.append(record.get(f"image_{ii}", ""))
+        batch.append(row)
+
+        if len(batch) >= 1000:
+            for r in batch:
+                ws.append(r)
+            batch = []
+
+    for r in batch:
+        ws.append(r)
 
     return wb
