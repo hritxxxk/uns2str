@@ -801,12 +801,12 @@ async function consumeSSE(response, isStart) {
 
           case 'complete':
             if (isStart) state.threadId = evt.thread_id;
-            if (bubble) finalizeBubble(bubble, evt.generated_files);
-            else if (evt.message) {
-              bubble = createBubble();
-              appendText(bubble, evt.message, false);
-              finalizeBubble(bubble, evt.generated_files);
-            }
+            if (!bubble) bubble = createBubble();
+            // Replace any temporary progress content with the final message
+            const cel = bubble.querySelector('.msg-content');
+            cel.innerHTML = '';
+            if (evt.message) cel.textContent = evt.message;
+            finalizeBubble(bubble, evt.generated_files);
             state.turnCount++;
             setStatus('ready');
             saveSession('active');
@@ -815,11 +815,14 @@ async function consumeSSE(response, isStart) {
         }
       }
     }
+  } catch (e) {
+    // SSE stream error — show it in the UI
+    showError('Stream error: ' + (e.message || e));
+    setStatus('idle');
   } finally {
     state.isStreaming = false;
     sendBtn.disabled = false;
-    msgInput.focus();
-    checkInput();
+    if (msgInput) { msgInput.focus(); checkInput(); }
   }
 }
 
