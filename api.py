@@ -15,9 +15,9 @@ from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from helpers import read_file
+# from helpers import read_file
 from learning import log_corrections
-from state import ColumnMapping
+# from state import ColumnMapping
 
 # ─── Request / Response Schemas ─────────────────────────────────
 
@@ -489,20 +489,20 @@ async def check_tracing():
 
 # ─── VinGPT SSE Endpoint ────────────────────────────────────────
 
-def _agent_state_for_triage():
-    return {
-        "messages": [], "source_path": "", "sheet_name": None,
-        "structured_response": None, "remaining_steps": 25,
-        "fingerprint": "", "is_known_schema": False, "headers": [],
-        "header_row": 0, "data_start_row": 1, "metadata": [], "profiles": [],
-        "sample_rows": [], "row_count": 0, "column_count": 0, "sheet_count": 0,
-        "sheets": [], "category_candidates": [], "category_path_config": {},
-        "category_hierarchy": [], "mapping": [], "mapping_requires_review": False,
-        "core_column_detection": {}, "attribute_definitions": [],
-        "reference_values": {}, "output_files": {}, "need_user_input": False,
-        "validation_errors": [], "validation_message": "", "correction_cycle": 0,
-        "error": None,
-    }
+# def _agent_state_for_triage():
+#     return {
+#         "messages": [], "source_path": "", "sheet_name": None,
+#         "structured_response": None, "remaining_steps": 25,
+#         "fingerprint": "", "is_known_schema": False, "headers": [],
+#         "header_row": 0, "data_start_row": 1, "metadata": [], "profiles": [],
+#         "sample_rows": [], "row_count": 0, "column_count": 0, "sheet_count": 0,
+#         "sheets": [], "category_candidates": [], "category_path_config": {},
+#         "category_hierarchy": [], "mapping": [], "mapping_requires_review": False,
+#         "core_column_detection": {}, "attribute_definitions": [],
+#         "reference_values": {}, "output_files": {}, "need_user_input": False,
+#         "validation_errors": [], "validation_message": "", "correction_cycle": 0,
+#         "error": None,
+#     }
 
 
 # @app.post("/vingpt/start")
@@ -604,11 +604,6 @@ class InteractiveRespondRequest(BaseModel):
 
 
 def extract_tenant_from_jwt(jwt_token: str) -> str:
-    """Extract tenant_id from JWT payload without verification.
-
-    Base64-decodes the payload section of a JWT (header.payload.signature)
-    and returns the tenant_id claim if present. Returns empty string on failure.
-    """
     import base64
     try:
         parts = jwt_token.split(".")
@@ -678,7 +673,13 @@ async def interactive_start(req: InteractiveStartRequest, request: Request):
             elif kind == "on_chat_model_stream":
                 chunk = data.get("chunk", "")
                 if chunk and hasattr(chunk, "content") and chunk.content:
-                    yield f"data: {json.dumps({'type': 'progress', 'message': chunk.content})}\n\n"
+                    raw = chunk.content
+                    if isinstance(raw, list):
+                        text = "".join(b.text for b in raw if hasattr(b, "text") and b.text)
+                    else:
+                        text = str(raw)
+                    if text:
+                        yield f"data: {json.dumps({'type': 'progress', 'message': text})}\n\n"
 
         # Graph finished — get final state
         state_vals = interactive_graph.get_state(config).values
@@ -709,13 +710,8 @@ async def interactive_start(req: InteractiveStartRequest, request: Request):
 
 
 @app.post("/interactive/respond")
-async def interactive_respond(req: InteractiveRespondRequest, request: Request):
-    """Send a message to the agent and stream the response via SSE.
+async def interactive_respond(req: InteractiveRespondRequest):
 
-    LangGraph natively supports sending new input to a completed thread.
-    The conditional START edge routes past triage (bypassed since profile_data exists
-    from the initial start), going straight to the agent with the user's message.
-    """
     config = {"configurable": {"thread_id": req.thread_id}}
 
     try:
@@ -749,7 +745,13 @@ async def interactive_respond(req: InteractiveRespondRequest, request: Request):
             elif kind == "on_chat_model_stream":
                 chunk = data.get("chunk", "")
                 if chunk and hasattr(chunk, "content") and chunk.content:
-                    yield f"data: {json.dumps({'type': 'progress', 'message': chunk.content})}\n\n"
+                    raw = chunk.content
+                    if isinstance(raw, list):
+                        text = "".join(b.text for b in raw if hasattr(b, "text") and b.text)
+                    else:
+                        text = str(raw)
+                    if text:
+                        yield f"data: {json.dumps({'type': 'progress', 'message': text})}\n\n"
 
         # Graph finished — read final state from the same thread (no serialization needed)
         state_vals = interactive_graph.get_state(config).values

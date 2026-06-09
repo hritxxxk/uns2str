@@ -1929,9 +1929,19 @@ def map_attributes(
     if not attr_columns:
         attr_columns = [h for h in headers if h.strip()]
 
-    # Step 2: Profile + mapping
-    cols = profile_columns.invoke({"headers": headers, "rows": all_data_rows})
-    filtered_profiles = [{"name": c["name"], "unique": c["unique"], "non_null": c["non_null"], "sample": c["sample"][:3]} for c in cols if c["name"] in attr_columns]
+    # Step 2: Profile columns via Polars (memory-safe for large files)
+    from helpers_data_plane import profile_large_file
+    profile_result = profile_large_file(file_path, sheet_name)
+    all_profiles = {p["column_name"]: p for p in profile_result["profiles"]}
+    filtered_profiles = [
+        {
+            "name": col,
+            "unique": all_profiles[col]["unique_count"],
+            "non_null": profile_result["row_count"] - all_profiles[col]["null_count"],
+            "sample": all_profiles[col]["sample_values"][:3],
+        }
+        for col in attr_columns if col in all_profiles
+    ]
 
     sample_rows = all_data_rows[:5]
     samples = [{h: str(r[i]).strip()[:80] for i, h in enumerate(headers) if i < len(r) and r[i] is not None and str(r[i]).strip()} for r in sample_rows]
@@ -2030,15 +2040,29 @@ def extract_references(
     cols = profile.get("profiles", [])
 
     if not cols and headers:
-        # Profile columns if not already profiled
+        # Profile columns via Polars (memory-safe)
         try:
-            gen = read_file(state.get("file_path", ""), state.get("sheet_name"))
-            hr = profile.get("header_row", 0)
-            dr = profile.get("data_start_row", hr + 1)
-            for _ in range(dr):
-                next(gen, None)
-            data_rows = list(gen)
-            cols = profile_columns.invoke({"headers": headers, "rows": data_rows})
+            from helpers_data_plane import profile_large_file
+            pr = profile_large_file(state.get("file_path", ""), state.get("sheet_name"))
+            cols = []
+            for p in pr["profiles"]:
+                uniq_vals = []
+                try:
+                    import polars as pl
+                    from helpers_data_plane import get_lazy_frame, detect_header_row_and_headers
+                    hr, _, _ = _detect_header_row_and_headers(state["file_path"], state.get("sheet_name"))
+                    lazy = _get_lazy_frame(state["file_path"], state.get("sheet_name"), hr, pr["headers"])
+                    uniq_vals = lazy.select(pl.col(p["column_name"]).unique()).collect(streaming=True)[p["column_name"]].to_list()
+                    uniq_vals = [str(v) for v in uniq_vals if v is not None]
+                except Exception:
+                    pass
+                cols.append({
+                    "name": p["column_name"],
+                    "non_null": pr["row_count"] - p["null_count"],
+                    "unique": p["unique_count"],
+                    "sample": p["sample_values"][:3],
+                    "unique_values": uniq_vals[:100] if len(uniq_vals) > 100 else uniq_vals,
+                })
         except Exception:
             cols = []
 
@@ -2203,7 +2227,8 @@ def render_templates(
 
     img_cols = extract_image_columns(headers, mapping_dicts)
     row_mappings = [{"source_column": m.source_column, "target_attribute": m.target_attribute} for m in mapping_objs]
-    product_rows = build_product_rows(
+    from helpers import build_product_rows_streaming
+    product_rows = build_product_rows_streaming(
         headers, rows, row_mappings, img_cols, state.get("core_mappings"),
     )
 
@@ -2256,6 +2281,7 @@ Do NOT skip ahead. If a milestone isn't in completed_phases, run it next.
 - If a tool returns empty/fails: do NOT retry the same turn. Tell the user what happened, ask a simple yes/no.
 - No jargon: use "missing values" not "null", "column layout" not "schema".
 - Off-topic user? Redirect back to the current phase politely.
+- If the user asks to see/list/show data, present it directly in your response.
 - Max 2 tool calls per turn. After 2, stop and present findings."""
 
 
@@ -2274,6 +2300,11 @@ def agent_reason_node(state: InteractiveIngestionState) -> dict:
         if last_is_assistant:
             logger.debug("agent | no pending user input — skipping LLM call")
             return {}  # No delta — state unchanged, router routes to END
+
+    # Windowing: keep last 12 messages to stay under token limit
+    if len(messages) > 12:
+        logger.info(f"agent | truncating {len(messages)} messages to last 12")
+        messages = messages[-12:]
 
     # Convert messages — preserve live LangChain objects, convert plain dicts
     lc_messages = []
