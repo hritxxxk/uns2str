@@ -61,6 +61,33 @@ def _llm_json(prompt: str, temperature: float = 1.0) -> dict:
         return {}
 
 
+_VALIDATE_TAXONOMY_PROMPT = """You are a PIM taxonomy expert. Review these extracted category paths.
+
+Paths: {paths}
+
+Determine if these are actual product category classifications (like "Apparel > Men > Shoes")
+or if they look like product codes, SKUs, serial numbers, or item names (like "1012B862.001").
+
+Return JSON:
+{{
+  "is_valid": true/false,
+  "reason": "If invalid, explain why and suggest what kind of columns to look for instead."
+}}
+"""
+
+
+def _validate_taxonomy_llm(paths: list[str]) -> tuple[bool, str]:
+    if not paths:
+        return True, ""
+    prompt = _VALIDATE_TAXONOMY_PROMPT.format(paths=json.dumps(paths[:20]))
+    result = _llm_json(prompt, temperature=0.2)
+    is_valid = result.get("is_valid", True)
+    reason = result.get("reason", "")
+    if not is_valid:
+        logger.info(f"taxonomy | invalid | {reason[:80]}")
+    return is_valid, reason
+
+
 def _make_empty_phase() -> PhaseOutput:
     return PhaseOutput(
         explanation="",
@@ -1801,6 +1828,10 @@ def extract_categories(
         # Direct reconstruction from user-specified columns
         updated_paths = build_paths_from_generator(file_path, sheet_name, specified_columns)
         if updated_paths:
+            is_valid, reason = _validate_taxonomy_llm(updated_paths)
+            if not is_valid:
+                return Command(value=f"The extracted values look like product codes rather than categories. {reason}")
+            state["profile_data"]["category_hierarchy"] = updated_paths
             state["profile_data"]["category_hierarchy"] = updated_paths
             state["categories"] = PhaseOutput(
                 explanation=f"Built from columns: {', '.join(specified_columns)}",
@@ -1854,6 +1885,10 @@ def extract_categories(
     resolve_category_paths(cat_state)
 
     paths = cat_state.get("category_hierarchy", [])
+    if paths:
+        is_valid, reason = _validate_taxonomy_llm(paths)
+        if not is_valid:
+            return Command(value=f"The extracted values look like product codes rather than categories. {reason}")
     explanation = cat_state.get("category_reasoning", "")
     needs_input = cat_state.get("need_user_input", False)
 
