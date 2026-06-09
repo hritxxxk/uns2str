@@ -20,6 +20,59 @@ def _detect_sheet(path, preferred=None):
         return 0
 
 
+def get_variance_sample_polars(source_path: str, title_col: str, limit: int = 5) -> list[dict]:
+    """
+    Stage 1 & 2: Identifies a candidate block of similar products without OOM.
+    Groups by the first 2 words of the product title to simulate LSH blocking.
+    """
+    lf = pl.scan_csv(source_path)
+
+    if title_col not in lf.columns:
+        return []
+
+    block_expr = (
+        pl.col(title_col)
+        .cast(pl.Utf8)
+        .str.split(" ")
+        .list.slice(0, 2)
+        .list.join(" ")
+        .alias("block_key")
+    )
+
+    sample_df = (
+        lf.with_columns(block_expr)
+        .filter(pl.col("block_key").is_not_null())
+        .filter(pl.len().over("block_key") > 1)
+        .head(limit)
+        .collect(streaming=True)
+    )
+
+    return sample_df.to_dicts()
+
+
+def execute_variant_rules_polars(source_path: str, invariants: list[str], variants: list[str], output_path: str):
+    """
+    Executes the LLM-calibrated invariant/variant rules over 1,000,000 rows.
+    """
+    lf = pl.scan_csv(source_path)
+
+    valid_invariants = [col for col in invariants if col in lf.columns]
+
+    if valid_invariants:
+        parent_expr = pl.concat_str([pl.col(k).cast(pl.Utf8) for k in valid_invariants]).hash().cast(pl.Utf8)
+    else:
+        parent_expr = pl.lit("")
+
+    variant_attr_str = "::".join(variants)
+
+    lf_enriched = lf.with_columns([
+        parent_expr.alias("parent_sku"),
+        pl.lit(variant_attr_str).alias("variant_attributes")
+    ])
+
+    lf_enriched.sink_csv(output_path)
+
+
 def detect_header_row_and_headers(path, sheet_name=None):
     ext = os.path.splitext(path)[1].lower()
     raw_rows = []

@@ -33,7 +33,15 @@ from tools_merger import merge_duplicates
 from tools_sheets import merge_sheets_programmatically
 from tools.profiling import profile_columns
 from learning import fetch_similar_examples
+from pydantic import BaseModel, Field
 from state import PIM_DEFAULTS, ColumnMapping
+
+
+class VariantRule(BaseModel):
+    variants_present: bool = Field(description="True if the sample shows product variants.")
+    invariant_keys: list[str] = Field(description="List of exact column names that MUST be identical across variants.")
+    variant_keys: list[str] = Field(description="List of exact column names that vary.")
+    explanation: str = Field(description="Conversational explanation of how you grouped the items.")
 
 load_dotenv()
 logger = logging.getLogger("pim_interactive")
@@ -2405,6 +2413,61 @@ def render_templates(
     )
 
 
+@tool
+def analyze_and_configure_variants(
+    state: Annotated[dict, InjectedState()],
+    tool_call_id: Annotated[str, InjectedToolCallId],
+) -> Command:
+    """
+    Analyzes a sample cluster of similar products to determine variant and invariant rules.
+    Call this BEFORE rendering products to establish Parent/Child SKU relationships.
+    """
+    file_path = state["file_path"]
+    core_mappings = state.get("core_mappings", {})
+
+    title_col = core_mappings.get("sku_name")
+    if not title_col:
+        return Command(
+            update={"messages": [ToolMessage(content="Cannot analyze variants: 'sku_name' is not mapped yet.", tool_call_id=tool_call_id)]}
+        )
+
+    from helpers_data_plane import get_variance_sample_polars
+    sample_block = get_variance_sample_polars(file_path, title_col)
+
+    if not sample_block:
+        return Command(
+            update={"messages": [ToolMessage(content="No variant clusters found in the dataset.", tool_call_id=tool_call_id)]}
+        )
+
+    system_instruction = (
+        "You are an expert data taxonomist. I am giving you a cluster of highly similar product rows. "
+        "Identify which columns are invariants (shared exactly across all rows in this product family) "
+        "and which are variants (options like size/color). Return a strict VariantRule JSON."
+    )
+
+    from langchain_google_genai import ChatGoogleGenerativeAI
+    variant_llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.2)
+    structured_llm = variant_llm.with_structured_output(VariantRule)
+
+    rule: VariantRule = structured_llm.invoke([
+        {"role": "system", "content": system_instruction},
+        {"role": "user", "content": f"Candidate Block: {sample_block}"}
+    ])
+
+    return Command(
+        update={
+            "variant_rule": rule.model_dump(),
+            "completed_phases": state.get("completed_phases", []) + ["variants"],
+            "messages": [
+                ToolMessage(
+                    content=f"Variant rules calibrated. {rule.explanation}",
+                    tool_call_id=tool_call_id,
+                )
+            ],
+        },
+    )
+
+
 # ─── Agent Reason Node ──────────────────────────────────────────
 
 AGENT_SYSTEM_PROMPT = """You are VinGPT, a PIM data onboarding assistant. Guide users from messy spreadsheet to 4 standardized PIM templates.
@@ -2417,6 +2480,7 @@ AGENT_SYSTEM_PROMPT = """You are VinGPT, a PIM data onboarding assistant. Guide 
 7. enrich → enrich_descriptions (if user asks to fill missing descriptions)
 8. merge_duplicates → merge_duplicates (if user asks to find/merge near-duplicates)
 9. merge_sheets → merge_sheets_programmatically (if file has multiple sheets to join)
+10. variants → analyze_and_configure_variants (before render, if product has sizes/colors)
 
 Do NOT skip ahead. If a milestone isn't in completed_phases, run it next.
 
@@ -2484,7 +2548,7 @@ def agent_reason_node(state: InteractiveIngestionState) -> dict:
     lc_messages = [SystemMessage(content=AGENT_SYSTEM_PROMPT)] + lc_messages
 
     # Build the agent LLM with tools bound
-    agent_tools = [profile_file, extract_categories, map_attributes, extract_references, build_products, render_templates, enrich_descriptions, merge_duplicates, merge_sheets_programmatically]
+    agent_tools = [profile_file, extract_categories, map_attributes, extract_references, build_products, render_templates, enrich_descriptions, merge_duplicates, merge_sheets_programmatically, analyze_and_configure_variants]
     llm = ChatGoogleGenerativeAI(
         model="gemini-2.5-flash",
         temperature=1.0,
@@ -2544,7 +2608,7 @@ def route_start(state: InteractiveIngestionState) -> str:
 builder = StateGraph(InteractiveIngestionState)
 
 # Register tools with ToolNode
-agent_tools = [profile_file, extract_categories, map_attributes, extract_references, build_products, render_templates, enrich_descriptions, merge_duplicates, merge_sheets_programmatically]
+agent_tools = [profile_file, extract_categories, map_attributes, extract_references, build_products, render_templates, enrich_descriptions, merge_duplicates, merge_sheets_programmatically, analyze_and_configure_variants]
 tool_node = ToolNode(agent_tools)
 
 builder.add_node("triage", triage_interactive)
