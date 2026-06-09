@@ -351,9 +351,13 @@ JSON:
 
 def build_paths_from_generator(file_path: str, sheet_name: str | None, columns: list[str]) -> list[str]:
     gen = read_file(file_path, sheet_name)
-    try:
-        headers_row = next(gen)
-    except StopIteration:
+    headers_row = None
+    for row in gen:
+        vals = [str(c).strip() for c in row if c is not None and str(c).strip()]
+        if vals:
+            headers_row = row
+            break
+    if headers_row is None:
         return []
     headers = [str(c).strip() for c in headers_row if c is not None]
     col_indices = []
@@ -2288,7 +2292,7 @@ Do NOT skip ahead. If a milestone isn't in completed_phases, run it next.
 def agent_reason_node(state: InteractiveIngestionState) -> dict:
     """Central reasoning engine — decides whether to call a tool or respond conversationally."""
     messages = state["messages"]
-    from langchain_core.messages import BaseMessage, SystemMessage
+    from langchain_core.messages import BaseMessage, SystemMessage, ToolMessage
 
     # If the last message is from assistant (no pending user input), skip LLM call
     if messages:
@@ -2301,10 +2305,20 @@ def agent_reason_node(state: InteractiveIngestionState) -> dict:
             logger.debug("agent | no pending user input — skipping LLM call")
             return {}  # No delta — state unchanged, router routes to END
 
-    # Windowing: keep last 12 messages to stay under token limit
+    # Windowing: keep last 12 messages, but never split function_call/function_response pairs
     if len(messages) > 12:
-        logger.info(f"agent | truncating {len(messages)} messages to last 12")
-        messages = messages[-12:]
+        truncated = messages[-12:]
+        # Walk forward from the truncation point to find a clean boundary
+        # (skip past any ToolMessages and AIMessages with tool_calls)
+        for i, msg in enumerate(truncated):
+            is_tool = isinstance(msg, ToolMessage)
+            is_tool_call = isinstance(msg, BaseMessage) and hasattr(msg, "tool_calls") and msg.tool_calls
+            if not is_tool and not is_tool_call:
+                messages = truncated[i:]
+                break
+        else:
+            messages = truncated
+        logger.info(f"agent | truncated {len(messages)} messages (windowed from larger history)")
 
     # Convert messages — preserve live LangChain objects, convert plain dicts
     lc_messages = []
