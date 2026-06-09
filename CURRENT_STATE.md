@@ -2,9 +2,9 @@
 
 ## Overview
 
-An agentic system that processes messy eCommerce source files (CSV, xlsx, xls) and produces 4 standardized PIM template files through a **conversational 4-phase interactive graph**.
+An agentic system that processes messy eCommerce source files (CSV, xlsx, xls) and produces 4 standardized PIM template files through a **cylic, tool-calling agent** built on LangGraph + Google GenAI.
 
-The Pipeline Graph and VinGPT Graph are **deprecated** — all active development is on the **Interactive Graph** (`interactive_graph.py`).
+The Pipeline Graph, VinGPT Graph, and hardcoded 6-node DAG are **deprecated** — all active development is on the **Cyclic Agent Graph** (`interactive_graph.py`).
 
 ---
 
@@ -12,163 +12,202 @@ The Pipeline Graph and VinGPT Graph are **deprecated** — all active developmen
 
 ```
 root/
-├── api.py                 # FastAPI server — all active endpoints
-├── interactive_graph.py   # ★ Primary: 4-phase interactive onboarding graph
-├── interactive_state.py   # InteractiveIngestionState + PhaseOutput schemas
-├── agents.py              # Category strategies + heuristic helpers
-├── helpers.py             # File I/O, encoding detection, template download
-├── state.py               # Legacy AgentState + Pydantic models
-├── graph.py               # Legacy Pipeline/VinGPT (commented out)
-├── main.py                # Legacy CLI (commented out)
-├── learning.py            # LangSmith ContextHub + log_corrections
-├── chat.html              # Light-mode chat frontend
-├── CURRENT_STATE.md       # ← You are here
-├── STATE_1.md             # Legacy reference
-├── STATE_2.md             # Phase 5/6 plan
-├── STATE_3.md             # Multi-source ZIP consolidation blueprint
+├── api.py                   # FastAPI server — SSE streaming via astream_events
+├── interactive_graph.py     # ★ Primary: cyclic agent graph (3 nodes, 6 tools)
+├── interactive_state.py     # InteractiveIngestionState + PhaseOutput schemas
+├── agents.py                # Category strategies + heuristic helpers
+├── helpers.py               # File I/O, encoding detection, template download
+├── state.py                 # Legacy AgentState + Pydantic models (deprecated)
+├── graph.py                 # Legacy Pipeline/VinGPT (commented out)
+├── main.py                  # Legacy CLI (commented out)
+├── learning.py              # LangSmith ContextHub + log_corrections
+├── chat.html                # Light-mode chat frontend
+├── CURRENT_STATE.md         # ← You are here
+├── STATE_1.md               # Legacy reference
+├── STATE_2.md               # Phase 5/6 plan
+├── STATE_3.md               # Multi-source ZIP consolidation blueprint
+├── tests/
+│   └── test_system.py       # 37 integration tests (graph, tools, API, output)
 ├── tools/
-│   ├── mapping.py         # build_attribute_definitions, normalize/validate
-│   ├── profiling.py       # profile_columns (legacy, partially used)
-│   ├── references.py      # extract_reference_values
-│   └── rendering.py       # render_*_xlsx (category/attribute/reference/product)
-├── blank-templates/       # Downloaded PIM blank templates
-├── output/                # Generated xlsx files (by fingerprint)
-├── cache/                 # Cached column mappings (by fingerprint)
-├── uploads/               # Uploaded files + merged sheets
-└── client-data/           # Source data files
+│   ├── mapping.py           # build_attribute_definitions, normalize/validate
+│   ├── profiling.py         # profile_columns (used by agent tools)
+│   ├── references.py        # extract_reference_values
+│   └── rendering.py         # render_*_xlsx (category/attribute/reference/product)
+├── blank-templates/         # Downloaded PIM blank templates
+├── output/                  # Generated xlsx files (by fingerprint)
+├── cache/                   # Cached column mappings (by fingerprint)
+├── uploads/                 # Uploaded files + merged sheets
+└── client-data/             # Source data files
 ```
 
 ---
 
-## Interactive Graph (`interactive_graph.py`) — Primary
+## Cyclic Agent Graph — Primary Architecture
 
-6 nodes, 4 interrupts, conversational chat interface.
+3 nodes, conditional routing, same-thread multi-turn conversation.
+
+### Graph Topology
 
 ```
-START → triage → categories ──[INTERRUPT]──
-                  attributes ──[INTERRUPT]──
-                  references ──[INTERRUPT]──
-                  products   ──[INTERRUPT]──
-                  render → END
+                                  START
+                                    │
+                          [route_start: profile_data?]
+                                 /          \
+                          (No) /            \ (Yes)
+                              ▼              ▼
+                           triage          agent (bypass)
+                              │              │
+                              ▼              │
+                           agent ◄───────────┘
+                              │
+                    [route_agent_action: tool_calls?]
+                         /                      \
+                  (Yes) /                        \ (No)
+                      ▼                            ▼
+                execute_tools                    END
+                (ToolNode)                    (wait for user)
+                      │
+                      └──→ agent (loop, max 2 iterations)
 ```
 
-| Node | Function | What it does |
+**Key properties:**
+- **Single thread, same thread** — every `/interactive/respond` re-invokes the same LangGraph thread
+- **Conditional entry** — `route_start()` checks `profile_data`: triage runs only on turn 1
+- **Delta-Only Returns** — every node returns only the fields it changes; `messages` uses `operator.add` reducer
+- **2-iteration budget** — `remaining_steps` caps tool calls per turn, reset on each user message
+- **No interrupts** — agent routes itself to END when it responds conversationally
+
+### Nodes
+
+| Node | Function | Behavior |
 |---|---|---|
-| `triage` | `triage_interactive` | Opens file, LLM-based header detection, collects multi-sheet metadata. |
-| `categories` | `categories_phase` | 5-strategy fallback (declarative recipe primary) + bypass + merge detection + conversational fallback |
-| `attributes` | `attributes_phase` | 2-call: screening (50→500 rows, adaptive) + mapping (3-bucket grouping). Validation + 3 auto-retry |
-| `references` | `references_phase` | Programmatic `extract_reference_values` + LLM education + messy value detection + bypass |
-| `products` | `products_phase` | Programmatic `build_product_rows` + image URL validation + LLM explanation |
-| `render` | `render_interactive` | Generates 4 xlsx templates (blank PIM templates if JWT available) |
+| `triage` | `triage_interactive` | Opens file, LLM-based header detection, collects multi-sheet metadata. Returns only deltas (greeting + profile_data + empty phase outputs). Runs once. |
+| `agent` | `agent_reason_node` | Calls `ChatGoogleGenerativeAI("gemini-2.5-flash")` with tools bound via `.bind_tools()`. Converts messages → LC format → SystemMessage prepended → LLM invoke → returns `{"messages": [response]}`. Skips if last message is from assistant (no pending user input). |
+| `execute_tools` | `ToolNode(agent_tools)` | LangGraph's built-in ToolNode. Executes requested tools via `InjectedState`. Returns ToolMessages appended via `operator.add` reducer. |
 
-### State Schema: `InteractiveIngestionState`
+### Router: `route_agent_action`
 
-17 fields:
+```python
+def route_agent_action(state):
+    last = state["messages"][-1]
+    if hasattr(last, "tool_calls") and last.tool_calls:
+        budget = state.get("remaining_steps", 0)
+        if budget > 0:
+            state["remaining_steps"] -= 1
+            return "execute_tools"
+    return END  # conversational response or budget exhausted
+```
 
-| Field | Type | Purpose |
-|---|---|---|
-| `messages` | `list` | Chat history |
-| `file_path` | `str` | Source file |
-| `sheet_name` | `str \| None` | Selected sheet |
-| `profile_data` | `dict \| None` | Collapsed file metadata |
-| `current_phase` | `str` | categories/attributes/references/products/complete |
-| `phases_completed` | `list` | Phases the user has confirmed |
-| `categories` | `PhaseOutput` | Output for categories phase |
-| `attributes` | `PhaseOutput` | Output for attributes phase |
-| `references` | `PhaseOutput` | Output for references phase |
-| `products` | `PhaseOutput` | Output for products phase |
-| `all_sheets` | `list` | Multi-sheet metadata for merge detection |
-| `sheet_merge` | `dict` | Merge detection result + user response |
-| `core_mappings` | `dict[str, str]` | SKU/code/mrp → source column |
-| `custom_mappings` | `dict[str, str]` | Dynamic attributes preserved as-is |
-| `mapping_confidence` | `dict[str, int]` | 0-100 confidence per mapping |
-| `generated_files` | `list[str]` | Output xlsx paths |
-| `jwt_token` | `str` | Bearer token for PIM API calls |
+---
+
+## 6 State-Aware Agent Tools
+
+All tools use `@tool` from `langchain_core.tools` and receive state via `Annotated[dict, InjectedState()]`.
+
+| Tool | LLM Args | Reads from State | Writes to State |
+|---|---|---|---|
+| `profile_file` | `file_path, sheet_name?` | — | `profile_data`, `sheet_name`, `all_sheets`, `completed_phases += ["triage"]` |
+| `extract_categories` | `file_path, sheet_name?, specified_columns?` | `profile_data`, `file_path` | `profile_data.category_hierarchy`, `categories`, `completed_phases += ["categories"]` |
+| `map_attributes` | `file_path, sheet_name?, feedback?` | `profile_data`, `file_path` | `core_mappings`, `custom_mappings`, `mapping_confidence`, `attributes`, `completed_phases += ["attributes"]` |
+| `extract_references` | *(none)* | `core_mappings`, `custom_mappings`, `profile_data` | `references`, `completed_phases += ["references"]` |
+| `build_products` | *(none)* | `core_mappings`, `custom_mappings`, `file_path`, `profile_data` | `products`, `product_rows`, `completed_phases += ["products"]` |
+| `render_templates` | *(none)* | all state | `generated_files`, `completed_phases += ["render"]` |
+
+**Path resolution fallback** — tools that receive `file_path` from the LLM resolve bare filenames via:
+1. `state["file_path"]` (from checkpoint)
+2. `os.path.join("uploads", basename)` prefix
+
+---
+
+## State Schema: `InteractiveIngestionState`
+
+### Fields
+
+| Field | Type | Reducer | Purpose |
+|---|---|---|---|
+| `messages` | `Annotated[list, operator.add]` | ✅ concatenates | Chat history (HumanMessage, AIMessage, ToolMessage) |
+| `file_path` | `str` | — | Source file path |
+| `sheet_name` | `str \| None` | — | Selected sheet |
+| `profile_data` | `dict \| None` | — | File metadata: headers, row_count, header_row, data_start_row, profiles |
+| `completed_phases` | `list[str]` | — | Milestone tracker: `["triage", "categories", ...]` |
+| `remaining_steps` | `int` | — | Tool call budget (reset to 2 per turn) |
+| `core_mappings` | `dict[str, str]` | — | Core PIM fields: `{target: source_column}` |
+| `custom_mappings` | `dict[str, str]` | — | Dynamic attributes: `{source_column: target}` |
+| `mapping_confidence` | `dict[str, int]` | — | 0-100 confidence per mapping |
+| `product_rows` | `list[dict]` | — | Built product rows for rendering |
+| `generated_files` | `list[str]` | — | Output xlsx paths |
+| `jwt_token` | `str` | — | PIM API bearer token |
+| `all_sheets` | `list` | — | Multi-sheet metadata |
+| `sheet_merge` | `dict` | — | Merge detection result |
+| `categories` | `PhaseOutput` | — | Phase output (populated by tools) |
+| `attributes` | `PhaseOutput` | — | Phase output (populated by tools) |
+| `references` | `PhaseOutput` | — | Phase output (populated by tools) |
+| `products` | `PhaseOutput` | — | Phase output (populated by tools) |
+| `current_phase` | `str` | — | Legacy, maintained for backward compat |
+| `phases_completed` | `list` | — | Legacy, maintained for backward compat |
 
 ### PhaseOutput (TypedDict)
 
 | Field | Type | Purpose |
 |---|---|---|
-| `explanation` | `str` | Glass-clear narrative shown in chat |
-| `reasoning` | `str` | Deeper technical rationale |
-| `suggestions` | `list[dict]` | Structured items (groups/items) |
-| `approved` | `bool` | User confirmed this phase |
+| `explanation` | `str` | LLM explanation shown in chat |
+| `reasoning` | `str` | Technical rationale |
+| `suggestions` | `list[dict]` | Structured items for user review |
+| `approved` | `bool` | User confirmation |
 | `user_feedback` | `str` | Freeform edits/corrections |
 
 ---
 
-## Phase Details
+## Agent System Prompt (Operational Playbook)
 
-### 1. Categories Phase
+~139 tokens. Guides tool selection in strict milestone order, error handling, jargon avoidance, and the 2-call budget.
 
-**Standard flow:** 5-strategy fallback chain in `agents.py:resolve_category_paths()`:
-1. Declarative recipe (primary) — LLM writes JSON config → Python executes on 100% rows
-2. Hierarchy sheet — scans other sheets
-3. Level columns — CATEGORY1-4 profiles
-4. Single column — parses path separators
-5. Infer from attributes — LLM fallback
+```
+## Milestones (strict order — check completed_phases before acting)
+1. triage (auto): file loaded & profiled
+2. categories → extract_categories  | 3. attributes → map_attributes
+4. references → extract_references  | 5. products → build_products
+6. render → render_templates
 
-**Bypass flow (ReAct):**
-- `parse_category_feedback()` — lightweight LLM call (~200 tokens)
-- If `is_direct_override` with `specified_columns` → `build_paths_from_generator()` → `approved=True`
-- If `is_merge_approval` → `execute_sheet_merge()` joins two sheets by key column
-- If `is_off_topic` → polite redirect, no state change
-- If conversational (none of the above matched) → `answer_category_query()` from state
+Do NOT skip ahead. If a milestone isn't in completed_phases, run it next.
 
-**Self-healing:** `_heal_category_paths()` fuzzy-merges near-duplicates (≥85% token overlap)
+## Rules
+- Explain before calling a tool. Present results clearly and ask confirmation.
+- If a tool returns empty/fails: do NOT retry the same turn.
+- No jargon: use "missing values" not "null".
+- Off-topic user? Redirect politely.
+- Max 2 tool calls per turn.
+```
 
-**Tree truncation:** >10 paths → first 5 shown, rest in `<details>` block
+---
 
-### 2. Attributes Phase
+## API Endpoints
 
-**Two sequential LLM calls:**
-
-| Call | Prompt | What it does |
+| Endpoint | Method | Purpose |
 |---|---|---|
-| 1. Screening | `SCREENING_PROMPT` | Adaptive sampling (50→500 rows, 3 rounds). Detects format (columns/EAV/hybrid). Screens which columns are attributes vs noise |
-| 2. Mapping | `MAPPING_PROMPT` | Maps only screened columns into 3 buckets (High-Confidence Core, Custom Preserved, Low-Confidence Ambiguous) with `attribute_type`, `attribute_data_type`, and `attribute_group` |
+| `/` | GET | Serves `chat.html` frontend |
+| `/upload` | POST | File upload (1MB chunked, returns `{path, filename}`) |
+| `/interactive/start` | POST (SSE) | Start session — triage → agent greeting → `complete` |
+| `/interactive/respond` | POST (SSE) | Send user message → agent processes → streams events → `complete` |
+| `/interactive/status` | POST | Check session state |
+| `/output/{file}` | GET | Download generated xlsx files |
 
-**Validation + Retry:**
-- `_validate_mappings()` — checks type compatibility (int/float/boolean/date regex, ≥20% threshold) + mandatory PIM_DEFAULTS (`sku_name`, `code`, `mrp`)
-- 3 auto-retry cycles with error context fed back into LLM prompt
+### SSE Event Types
 
-**Caching:** Fingerprint-based (`cache/{sha256[:16]}.json`) — skips both LLM calls on cache hit
+| Event | When | Fields |
+|---|---|---|
+| `tool_start` | Agent calls a tool | `tool`, `input` |
+| `tool_end` | Tool completes | `tool`, `output_preview` |
+| `progress` | LLM streaming text | `message` (token chunks) |
+| `complete` | Turn finished | `thread_id`, `message`, `generated_files` |
 
-**Few-shot learning:** `fetch_similar_examples()` from LangSmith ContextHub injects up to 5 historical corrections
+### `/interactive/respond` Request
 
-### 3. References Phase
+```json
+{"thread_id": "uuid", "message": "Find categories using CATEGORY1, CATEGORY2"}
+```
 
-**Standard flow:**
-- `extract_reference_values()` — programmatic, reads unique values from column profiles
-- LLM call — generates educational explanation + detects messy values (`MED` → `M`)
-- Values capped at 20 in suggestions
-
-**Bypass flow:**
-- `parse_reference_feedback()` — detects approval or value overrides
-- If `keep_values={"SML": "keep as SML"}` → removes from `messy_values` + `normalizations`
-
-### 4. Products Phase
-
-**Standard flow:**
-- `build_product_rows()` — programmatic, reads 100% of rows, maps by `core_mappings` + `custom_mappings`
-- `extract_image_columns()` — detects image URL columns
-- Image URL validation — checks if URLs start with `http`, flags >30% failure rate
-- LLM call — explains preview (no data decisions)
-
-**Bypass flow:**
-- `parse_product_feedback()` — detects approval or column exclusion
-- If `is_approval` → auto-advance to render
-- If `exclude_columns` → filters row mappings before building
-
-### 5. Render
-
-Fully programmatic — generates 4 xlsx files:
-- `{fingerprint}_category.xlsx` — one path per row
-- `{fingerprint}_attribute.xlsx` — 17-column PIM attribute schema
-- `{fingerprint}_reference.xlsx` — unique values per dropdown/multiselect master
-- `{fingerprint}_product.xlsx` — 6 fixed + N dynamic + 9 image columns
-
-Downloads PIM blank templates via JWT if available; creates from scratch otherwise.
+No `approved` or `feedback` fields — the agent handles everything conversationally.
 
 ---
 
@@ -176,7 +215,7 @@ Downloads PIM blank templates via JWT if available; creates from scratch otherwi
 
 ```
 1. Declarative Recipe (AI-generated)  ← PRIMARY
-   → LLM profiles columns → writes JSON recipe → Python executes on 100% of rows → self-heals
+   → LLM profiles columns → writes JSON recipe → Python executes on 100% rows → self-heals
 
 2. Hierarchy Sheet
    → Scans other sheets for explicit hierarchy data
@@ -191,75 +230,26 @@ Downloads PIM blank templates via JWT if available; creates from scratch otherwi
    → LLM guesses from column names + one sample row
 ```
 
----
-
-## API Endpoints
-
-| Endpoint | Method | Purpose |
-|---|---|---|
-| `/` | GET | Serves chat.html frontend |
-| `/upload` | POST | File upload (1MB chunks, returns server path) |
-| `/interactive/start` | POST (SSE) | Start 4-phase onboarding with streaming progress + phase events |
-| `/interactive/respond` | POST | Submit user feedback, resume graph, auto-advance through approved phases |
-| `/interactive/status` | POST | Check session state |
-| `/output/{file}` | GET | Download generated xlsx files |
-
----
-
-## Auto-Advance Cascade
-
-**SSE handler** (`/interactive/start`):
-```python
-while phases_run < max_phases:
-    graph.stream(initial or None, config)
-    phase = state["current_phase"]
-    if state[phase]["approved"]:
-        phases_run += 1; continue   # silent advance
-    yield SSE phase data; break     # pause for user
-```
-
-**Respond handler** (`/interactive/respond`):
-```python
-while auto_advance_count < 4:
-    if not is_empty and not is_approved:
-        break
-    # Phase is empty (uncomputed) or auto-approved → stream next
-    advance phase, stream again
-```
-
-Both loops are fully generic — check `approved` on whatever phase the graph reports, no hardcoded phase names.
-
----
-
-## Frontend (`chat.html`)
-
-Single-file light-mode HTML, purple accents, ChatGPT-style interface:
-
-- SSE streaming with animated progress cards
-- Background processing indicator for large files (>10000 rows)
-- Phase messages rendered as plain text with collapsible "Show sample data" + "Why I chose this"
-- Category path truncation at >10 (first 5 + `+N more` toggle)
-- Attribute group display: `Heel Height → heel_height [Sizing & Fit]`
-- Download links for final xlsx files
-- No sidebar, no structured cards, no action buttons — pure chat
+Called internally by the `extract_categories` tool.
 
 ---
 
 ## Guardrails
 
-| Layer | What it catches | Response |
-|---|---|---|
-| `parse_*_feedback` | Off-topic chat (jokes, weather, coding) | `is_off_topic=True` → polite redirect, no state change |
-| `parse_*_feedback` | PIM intent | `is_direct_override/has_override/is_approval` → bypass + auto-advance |
-| `user_feedback=""` after bypass | Prompt leakage prevention | Next phase's prompt doesn't contain previous phase's feedback |
-| Cache fingerprint | Duplicate header schemas | Skips LLM entirely, loads previous mappings |
-| Auto-retry (3 cycles) | Type validation failures | Re-runs LLM with error context, capped at 3 |
+| Layer | Mechanism |
+|---|---|
+| Off-topic chat | Agent's system prompt: "Off-topic user? Redirect politely." |
+| Tool ordering | `completed_phases` list — agent checks before calling next tool |
+| Loop budget | `remaining_steps` decremented per tool call, reset to 2 per user turn |
+| Cache fingerprint | Attribute mappings cached by header SHA-256 — skips LLM on repeat runs |
+| Path resolution | Tools fall back to `state["file_path"]` or `uploads/` prefix when LLM provides bare filenames |
+| Profile_data safety | All 9 read sites use `.get("profile_data", {}) or {}` to handle `None` |
 
 ---
 
 ## File Reading — Lazy Generator Pattern
 
-`helpers.py:read_file()` returns a **generator**, not a list. Never materializes the full file in memory.
+`helpers.py:read_file()` returns a **generator**, never materializes the full file in memory.
 
 | Enhancement | Status |
 |---|---|
@@ -270,23 +260,51 @@ Single-file light-mode HTML, purple accents, ChatGPT-style interface:
 
 ---
 
-## Multi-Sheet Merge Detection
+## Output Files
 
-When a file has ≥2 sheets with common key columns (e.g., `ITEM CODE` appearing in both sheets):
+Generated by `render_templates` tool, saved to `output/`:
 
-1. LLM detects the relationship and generates a user-facing question
-2. Question is prepended to the categories explanation in SSE stream
-3. User says "yes merge them" → `execute_sheet_merge()` joins sheets by key, writes to `uploads/merged_*.xlsx`
-4. User says "no keep separate" → proceeds with primary sheet only
+| File | Schema |
+|---|---|
+| `{fingerprint}_category.xlsx` | Column: Category Path (one unique path per row, `>` separator) |
+| `{fingerprint}_attribute.xlsx` | 17 columns: Attribute Name, Short Name, Display Name, Attribute Type, Attribute Data Type, Constraint, Length, Mandatory, Filter, Editability, Visibility, Searchable, Auto Translate, Attribute Group, Reference Master, Reference Attribute, Status |
+| `{fingerprint}_reference.xlsx` | One column per Reference Master (Brand Master, Size Master, etc.) with allowed values |
+| `{fingerprint}_product.xlsx` | 6 fixed cols (Category Path, Variant Attributes, Parent SKU, Code, sku_name, mrp) + N dynamic attribute cols + 9 image cols |
 
 ---
 
-## Image URL Validation
+## Bug Fix History (Recent Session)
 
-- After `build_product_rows`, scans all `image_1` through `image_9` values
-- Flags URLs not starting with `http` (relative paths, internal references)
-- If >30% broken → warning appended to products explanation
-- Non-blocking — files still generate, user can proceed via approval
+| Bug | Root Cause | Fix |
+|---|---|---|
+| `contents are required` | Skip check missed plain dicts from triage | Added `isinstance(last, dict) and last.get("role") == "assistant"` |
+| ToolNode wipes message history | `messages: list` had no reducer → replace behavior | Changed to `messages: Annotated[list, operator.add]` |
+| State duplication on re-entry | Triage returned full state including messages | Changed to delta-only return pattern |
+| `can only concatenate list to int` | Multi-sheet loop overwrote `header_row` with a list | Renamed loop variable to `sheet_headers` |
+| `NoneType has no .get()` | `state.get("profile_data", {})` returns `None` when value is `None` | Added `or {}` fallback on all 9 read sites |
+| LLM passes bare filenames | Tools need full path to open files | Path resolution fallback: state path → `uploads/` prefix |
+
+---
+
+## Test Suite
+
+`tests/test_system.py` — 37 tests, run with:
+
+```bash
+# Local graph tests (fast, no API key needed for structure tests)
+python3 tests/test_system.py --quick
+
+# Full suite against live server
+python3 tests/test_system.py --api http://localhost:8000
+```
+
+| Group | Tests | Coverage |
+|---|---|---|
+| Graph Structure | 7 | Nodes, conditional edges, reducer, route_start |
+| Tool Unit Tests | 14 | All 6 tools, state mutations, completed_phases |
+| API Endpoints | 6 | Health, upload, start SSE, respond SSE, status |
+| Output Validation | 6 | Product/attribute xlsx format, column headers |
+| Edge Cases | 3 | Bare filename resolution, missing file error handling |
 
 ---
 
@@ -311,24 +329,17 @@ uvicorn api:app --reload
 # 2. Open the frontend
 open http://localhost:8000
 
-# 3. Or use curl for SSE streaming
-curl -X POST http://localhost:8000/interactive/start \
-  -H "Content-Type: application/json" \
-  -d '{"file_path": "client-data/client_data/apparel_clean_sample.xlsx"}'
+# 3. Upload + Start + Respond via curl
+UPLOAD=$(curl -s -X POST http://localhost:8000/upload \
+  -F "file=@client-data/client_data/apparel_clean_sample.xlsx" | python3 -c "import sys,json; print(json.load(sys.stdin)['path'])")
 
-# 4. Submit feedback
-curl -X POST http://localhost:8000/interactive/respond \
+THREAD=$(curl -s -N -X POST http://localhost:8000/interactive/start \
   -H "Content-Type: application/json" \
-  -d '{"thread_id": "<id>", "approved": false, "feedback": "combine CATEGORY1 and CATEGORY2"}'
+  -d "{\"file_path\": \"$UPLOAD\"}" | grep -o '"thread_id":"[^"]*"' | cut -d'"' -f4)
 
-# 5. Upload a file
-curl -X POST http://localhost:8000/upload \
-  -F "file=@/path/to/file.xlsx"
-
-# 6. Check session status
-curl -X POST http://localhost:8000/interactive/status \
+curl -s -N -X POST http://localhost:8000/interactive/respond \
   -H "Content-Type: application/json" \
-  -d '{"thread_id": "<id>"}'
+  -d "{\"thread_id\": \"$THREAD\", \"message\": \"Find categories\"}"
 ```
 
 ---
@@ -337,15 +348,16 @@ curl -X POST http://localhost:8000/interactive/status \
 
 | Component | Status | Notes |
 |---|---|---|
-| `graph.py` — Pipeline graph | ❌ Commented out | Replaced by `interactive_graph.py` |
-| `graph.py` — VinGPT graph | ❌ Commented out | Replaced by `interactive_graph.py` |
-| `main.py` — CLI | ❌ Commented out | Use FastAPI server instead |
-| `api.py` — `/ingest/*` endpoints | ❌ Commented out | Use `/interactive/*` instead |
-| `api.py` — `/vingpt/start` | ❌ Commented out | Use `/interactive/start` instead |
-| `agents.py` — graph node functions | ❌ Dead code | `fingerprint_source`, `profile_source`, `map_columns`, etc. |
-| `agents.py` — category strategies | ✅ Active | Used as fallback chain by interactive graph |
-| `state.py` — `AgentState` | ❌ Legacy | `InteractiveIngestionState` is the primary state |
-| `state.py` — `ColumnMapping` | ✅ Shared | Used by both old and new graphs |
+| `graph.py` — Pipeline graph | ❌ Commented out | Replaced by agent graph |
+| `graph.py` — VinGPT graph | ❌ Commented out | Replaced by agent graph |
+| `main.py` — CLI | ❌ Commented out | Use FastAPI server |
+| `api.py` — `/ingest/*` | ❌ Commented out | Use `/interactive/*` |
+| `api.py` — `/vingpt/*` | ❌ Commented out | Use `/interactive/*` |
+| `agents.py` — legacy node fns | ❌ Dead code | Replaced by 6 agent tools |
+| `agents.py` — category strategies | ✅ Active | Used by `extract_categories` tool |
+| `state.py` — `AgentState` | ❌ Legacy | Use `InteractiveIngestionState` |
+| `state.py` — `ColumnMapping` | ✅ Shared | Used by render logic |
+| `interactive_graph.py` — old phase nodes | ❌ Dead code | `categories_phase`, `attributes_phase`, etc. remain in file but unreachable |
 
 ---
 
@@ -353,8 +365,10 @@ curl -X POST http://localhost:8000/interactive/status \
 
 | Gap | Impact | Status |
 |---|---|---|
-| **Product template uses scratch fallback** | `render_product_xlsx` creates from scratch, doesn't use PIM's product template | Needs Phase 6 |
+| **Product template uses scratch fallback** | `render_product_xlsx` doesn't use PIM's product template | Phase 6 |
 | **No Selenium blueprint** | PIM has no API for some uploads | Phase 6 |
-| **No regression tests** | No CI, no test suite | Phase 7 |
-| **ZIP pre-processor** | Cannot handle multi-file ZIP uploads >2GB | STATE_3.md — Tasks 7-10 |
+| **No CI pipeline** | Tests must be run manually | Phase 7 |
+| **ZIP pre-processor** | Cannot handle multi-file ZIP uploads >2GB | STATE_3.md |
 | **Celery async workers** | Long-running tasks block SSE stream | Phase 8 |
+| **LLM hallucinates file paths** | Agent passes `"/data/pim.xlsx"` or bare filenames | Tool path resolution mitigates, but not eliminated |
+| **chat.html needs update** | Frontend still expects old `approved`/`feedback` API format | Chat.html update |

@@ -590,7 +590,7 @@ def _agent_state_for_triage():
 # ─── Interactive Graph Endpoints ────────────────────────────────
 
 from interactive_graph import interactive_graph
-from interactive_state import PhaseOutput
+# PhaseOutput removed — agent uses tools to populate structured state directly
 
 
 class InteractiveStartRequest(BaseModel):
@@ -600,8 +600,7 @@ class InteractiveStartRequest(BaseModel):
 
 class InteractiveRespondRequest(BaseModel):
     thread_id: str = Field(description="Thread ID from /interactive/start")
-    approved: bool = Field(description="User confirmed this phase's suggestions")
-    feedback: str = Field(default="", description="Optional freeform edits or corrections")
+    message: str = Field(default="", description="User's follow-up message to the agent")
 
 
 def extract_tenant_from_jwt(jwt_token: str) -> str:
@@ -632,30 +631,21 @@ def _build_interactive_initial(file_path: str, sheet_name: str | None, jwt: str)
         "profile_data": None,
         "current_phase": "categories",
         "phases_completed": [],
-        "categories": PhaseOutput(explanation="", reasoning="", suggestions=[], approved=False, user_feedback=""),
-        "attributes": PhaseOutput(explanation="", reasoning="", suggestions=[], approved=False, user_feedback=""),
-        "references": PhaseOutput(explanation="", reasoning="", suggestions=[], approved=False, user_feedback=""),
+        "core_mappings": {},
         "custom_mappings": {},
         "mapping_confidence": {},
         "generated_files": [],
         "jwt_token": jwt,
-        "products": PhaseOutput(explanation="", reasoning="", suggestions=[], approved=False, user_feedback=""),
         "all_sheets": [],
         "sheet_merge": {},
         "product_rows": [],
-        "core_mappings": {},
+        "remaining_steps": 0,
+        "completed_phases": [],
     }
 
 
 @app.post("/interactive/start")
 async def interactive_start(req: InteractiveStartRequest, request: Request):
-    """Start a new interactive 4-phase onboarding session.
-
-    SSE stream that:
-    1. Runs triage (file profiling) and streams progress events
-    2. Runs the first phase (categories) and streams the phase data
-    3. Closes the stream — client then uses /interactive/respond
-    """
     if not os.path.exists(req.file_path):
         raise HTTPException(status_code=404, detail=f"File not found: {req.file_path}")
 
@@ -667,251 +657,141 @@ async def interactive_start(req: InteractiveStartRequest, request: Request):
     async def event_stream():
         initial = _build_interactive_initial(req.file_path, req.sheet_name, auth_header)
 
-        # Phase 0: triage — stream file profiling progress
         yield f"data: {json.dumps({'type': 'progress', 'message': 'Opening file...'})}\n\n"
 
-        from graph import triage_source
+        # Let the graph's own triage node handle profiling
+        # Stream the graph using astream_events for real-time tool visibility
+        async for event in interactive_graph.astream_events(initial, config, version="v2"):
+            kind = event.get("event", "")
+            name = event.get("name", "")
+            data = event.get("data", {})
 
-        ts_state = triage_source({
-            "source_path": req.file_path,
-            "sheet_name": req.sheet_name,
-            "messages": [{"role": "user", "content": "Profile file"}],
-        })
+            if kind == "on_tool_start":
+                tool_input = str(data.get("input", ""))[:300]
+                yield f"data: {json.dumps({'type': 'tool_start', 'tool': name, 'input': tool_input})}\n\n"
 
-        headers = ts_state.get("headers", [])
-        row_count = ts_state.get("row_count", 0)
-        column_count = ts_state.get("column_count", 0)
-        sheet_name = ts_state.get("sheet_name") or "auto-detected"
-        header_row = ts_state.get("header_row", 0)
+            elif kind == "on_tool_end":
+                output_raw = data.get("output", "")
+                output_str = str(output_raw)[:200] if output_raw else ""
+                yield f"data: {json.dumps({'type': 'tool_end', 'tool': name, 'output_preview': output_str})}\n\n"
 
-        if row_count > 10000:
-            yield f"data: {json.dumps({
-                'type': 'background',
-                'rows': row_count,
-                'message': f'Your file has {row_count} rows. Background processing started — you will be notified when ready.',
-            })}\n\n"
+            elif kind == "on_chat_model_stream":
+                chunk = data.get("chunk", "")
+                if chunk and hasattr(chunk, "content") and chunk.content:
+                    yield f"data: {json.dumps({'type': 'progress', 'message': chunk.content})}\n\n"
 
+        # Graph finished — get final state
+        state_vals = interactive_graph.get_state(config).values
+        messages = state_vals.get("messages", [])
+
+        # Find the last assistant message
+        last_content = ""
+        for m in reversed(messages):
+            if hasattr(m, "content") and m.content:
+                last_content = m.content
+                break
+            elif isinstance(m, dict) and m.get("role") == "assistant":
+                last_content = m.get("content", "")
+                break
+
+        files = state_vals.get("generated_files", [])
+
+        # Send completion event
         yield f"data: {json.dumps({
-            'type': 'progress',
-            'message': f'I detected {column_count} columns on sheet \"{sheet_name}\" and verified Row {header_row + 1} contains your headers.',
-            'details': {'columns': column_count, 'rows': row_count, 'sheet': sheet_name, 'header_row': header_row},
+            'type': 'complete',
+            'thread_id': thread_id,
+            'message': last_content,
+            'generated_files': files,
         })}\n\n"
-
-        # Seed profile_data into interactive state
-        sample_rows = []
-        try:
-            gen = read_file(req.file_path, sheet_name)
-            dr = ts_state.get("data_start_row", header_row + 1)
-            for _ in range(dr):
-                next(gen, None)
-            sample_rows = take_rows(gen, 5)
-            sample_rows = [
-                {headers[i]: str(row[i])[:60] for i in range(min(len(headers), len(row))) if row[i] is not None and str(row[i]).strip()}
-                for row in sample_rows
-            ]
-        except Exception:
-            pass
-
-        initial["profile_data"] = {
-            "headers": headers,
-            "sample_rows": sample_rows,
-            "row_count": row_count,
-            "column_count": column_count,
-            "header_row": header_row,
-            "data_start_row": ts_state.get("data_start_row", header_row + 1),
-        }
-        initial["profile_data"]["category_hierarchy"] = []
-
-        # Stream the graph — runs triage then hits interrupt on categories
-        yield f"data: {json.dumps({'type': 'progress', 'message': 'Analysing column structure and values...'})}\n\n"
-         # Auto-advance loop: after each interrupt, check if phase was auto-approved                                                                                                          
-        max_phases = 4                                                                                                                                                                       
-        phases_run = 0                                                                                                                                                                       
-        while phases_run < max_phases:                                                                                                                                                       
-            for event in interactive_graph.stream(None if phases_run > 0 else initial, config): 
-                for node_name, node_data in event.items(): 
-                    if node_name == "__interrupt__": 
-                        break 
-
-            state_vals = interactive_graph.get_state(config).values 
-            current_phase = state_vals.get("current_phase", "categories") 
-            phase_output = state_vals.get(current_phase, {}) 
-            is_approved = phase_output.get("approved", False) 
-
-            if is_approved: 
-                phases_run += 1 
-                logger.info(f"interactive | auto-advance | phase={current_phase} | approved=True") 
-                continue 
-
-            # Not approved — pause and send to frontend 
-            yield f"data: {json.dumps({ 
-                'type': 'phase', 
-                'phase': current_phase, 
-                'thread_id': thread_id, 
-                'explanation': phase_output.get('explanation', ''), 
-                'reasoning': phase_output.get('reasoning', ''), 
-                'suggestions': phase_output.get('suggestions', []), 
-                'message': state_vals.get('messages', [{}])[-1].get('content', '') if state_vals.get('messages') else '', 
-            })}\n\n" 
-            logger.info(f"interactive | thread={thread_id} | phase={current_phase} | paused") 
-            break 
-
+        logger.info(f"interactive | thread={thread_id} | complete | files={len(files)}")
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 @app.post("/interactive/respond")
 async def interactive_respond(req: InteractiveRespondRequest, request: Request):
-    """Resume an interactive session with user feedback.
+    """Send a message to the agent and stream the response via SSE.
 
-    Accepts the user's approval + optional feedback text, updates the
-    current phase's PhaseOutput, advances to the next phase, and returns
-    the new phase's data (or completion result).
+    LangGraph natively supports sending new input to a completed thread.
+    The conditional START edge routes past triage (bypassed since profile_data exists
+    from the initial start), going straight to the agent with the user's message.
     """
-    tenant_id = ""
     config = {"configurable": {"thread_id": req.thread_id}}
 
     try:
-        current = interactive_graph.get_state(config)
+        interactive_graph.get_state(config)
     except Exception:
         raise HTTPException(status_code=404, detail=f"Thread '{req.thread_id}' not found")
 
+    # Load full state from checkpoint, append user message, reset budget
+    current = interactive_graph.get_state(config)
     vals = dict(current.values)
-    tenant_id = extract_tenant_from_jwt(vals.get("jwt_token", ""))
-    config["configurable"]["tenant_id"] = tenant_id
+    from langchain_core.messages import HumanMessage
+    vals.setdefault("messages", []).append(HumanMessage(content=req.message))
+    vals["remaining_steps"] = 2
 
-    phase = vals.get("current_phase", "categories")
+    async def event_stream():
+        async for event in interactive_graph.astream_events(vals, config, version="v2"):
+            # Capture and yield SSE events
+            kind = event.get("event", "")
+            name = event.get("name", "")
+            data = event.get("data", {})
 
-    if phase == "complete":
-        return {
-            "status": "complete",
-            "thread_id": req.thread_id,
-            "generated_files": vals.get("generated_files", []),
-        }
+            if kind == "on_tool_start":
+                tool_input = str(data.get("input", ""))[:300]
+                yield f"data: {json.dumps({'type': 'tool_start', 'tool': name, 'input': tool_input})}\n\n"
 
-    # Update the current phase output with user feedback
-    phase_output = dict(vals.get(phase, PhaseOutput(
-        explanation="", reasoning="", suggestions=[], approved=False, user_feedback="",
-    )))
-    phase_output["approved"] = req.approved
-    phase_output["user_feedback"] = req.feedback
-    vals[phase] = PhaseOutput(**phase_output)
+            elif kind == "on_tool_end":
+                output_raw = data.get("output", "")
+                output_str = str(output_raw)[:200] if output_raw else ""
+                yield f"data: {json.dumps({'type': 'tool_end', 'tool': name, 'output_preview': output_str})}\n\n"
 
-    # If approved, advance to next phase. If rejected, stay on same phase with feedback.
-    if req.approved:
-        completed = list(vals.get("phases_completed", []))
-        completed.append(phase)
-        vals["phases_completed"] = completed
+            elif kind == "on_chat_model_stream":
+                chunk = data.get("chunk", "")
+                if chunk and hasattr(chunk, "content") and chunk.content:
+                    yield f"data: {json.dumps({'type': 'progress', 'message': chunk.content})}\n\n"
 
-        phase_order = ["categories", "attributes", "references", "products", "complete"]
-        idx = phase_order.index(phase)
-        next_phase = phase_order[idx + 1] if idx + 1 < len(phase_order) else "complete"
-        vals["current_phase"] = next_phase
-        logger.info(f"interactive | thread={req.thread_id} | tenant={tenant_id} | phase={phase} -> {next_phase} | approved")
-    else:
-        logger.info(f"interactive | thread={req.thread_id} | tenant={tenant_id} | phase={phase} | re-run with feedback")
+        # Graph finished — read final state from the same thread (no serialization needed)
+        state_vals = interactive_graph.get_state(config).values
 
-    # Update state and resume
-    interactive_graph.update_state(config, vals)
+        messages = state_vals.get("messages", [])
+        last_content = ""
+        for m in reversed(messages):
+            if hasattr(m, "content") and m.content:
+                last_content = m.content
+                break
+            elif isinstance(m, dict) and m.get("role") == "assistant":
+                last_content = m.get("content", "")
+                break
 
-    # Stream until next interrupt or completion
-    for event in interactive_graph.stream(None, config):
-        pass
+        files = state_vals.get("generated_files", [])
 
-    new_vals = interactive_graph.get_state(config).values 
-    new_phase = new_vals.get("current_phase", "complete") 
+        # Log to LangSmith if complete
+        if files:
+            try:
+                profile = state_vals.get("profile_data", {})
+                headers = profile.get("headers", [])
+                if headers:
+                    fp = fingerprint_headers(headers)
+                    core = state_vals.get("core_mappings", {})
+                    custom = state_vals.get("custom_mappings", {})
+                    mapping_list = [
+                        {"source_column": col, "target_attribute": tgt}
+                        for tgt, col in {**core, **{v: k for k, v in custom.items()}}.items()
+                    ]
+                    log_corrections(mapping_list, profile.get("profiles", []), fingerprint=fp)
+            except Exception as exc:
+                logger.warning(f"interactive | log_corrections failed: {exc}")
 
-    # Check if the phase was auto-approved by the graph (bypass) 
-    phase_output = new_vals.get(new_phase, {}) 
-    if isinstance(phase_output, dict) and phase_output.get("approved", False): 
-        phase_order = ["categories", "attributes", "references", "products", "complete"] 
-        if new_phase in phase_order: 
-            idx = phase_order.index(new_phase) 
-            new_phase = phase_order[idx + 1] if idx + 1 < len(phase_order) else "complete" 
-            logger.info(f"interactive | auto-advanced | phase={new_phase} | bypass detected") 
+        yield f"data: {json.dumps({
+            'type': 'complete',
+            'thread_id': req.thread_id,
+            'message': last_content,
+            'generated_files': files,
+        })}\n\n"
+        logger.info(f"interactive | thread={req.thread_id} | respond complete | files={len(files)}")
 
-    if new_phase == "complete": 
-
-        files = new_vals.get("generated_files", [])
-        # Log approved mappings to LangSmith for future learning
-        try:
-            from helpers import fingerprint_headers
-            profile = new_vals.get("profile_data", {})
-            headers = profile.get("headers", [])
-            if headers:
-                fp = fingerprint_headers(headers)
-                core = new_vals.get("core_mappings", {})
-                custom = new_vals.get("custom_mappings", {})
-                mapping_list = [
-                    {"source_column": col, "target_attribute": tgt}
-                    for tgt, col in {**core, **{v: k for k, v in custom.items()}}.items()
-                ]
-                log_corrections(mapping_list, profile.get("profiles", []), fingerprint=fp)
-        except Exception as exc:
-            logger.warning(f"interactive | log_corrections failed: {exc}")
-        return {
-            "status": "complete",
-            "thread_id": req.thread_id,
-            "phase": "complete",
-            "generated_files": files,
-            "message": new_vals.get("messages", [{}])[-1].get("content", "") if new_vals.get("messages") else "",
-        }
-
-    # Auto-advance loop: if we bypassed, keep streaming through subsequent phases 
-    auto_advance_count = 0 
-    while auto_advance_count < 4:  
-        next_output = new_vals.get(new_phase, {})  
-        is_empty = not next_output.get("explanation") and new_phase not in ("complete",) 
-        is_approved = next_output.get("approved", False) 
-        if not is_empty and not is_approved: 
-            break 
-        # Phase was also auto-approved — stream again to run the next phase 
-        auto_advance_count += 1 
-        vals["current_phase"] = new_phase 
-        interactive_graph.update_state(config, vals) 
-        for event in interactive_graph.stream(None, config): 
-            pass 
-        new_vals = interactive_graph.get_state(config).values 
-        new_phase = new_vals.get("current_phase", "complete") 
-        if new_phase == "complete": 
-            break 
-
-    if new_phase == "complete":                                                                                                                                                              
-        files = new_vals.get("generated_files", [])                                                                                                                                          
-        try:                                                                                                                                                                                 
-            from helpers import fingerprint_headers                                                                                                                                          
-            profile = new_vals.get("profile_data", {})                                                                                                                                       
-            headers = profile.get("headers", [])                                                                                                                                             
-            if headers:                                                                                                                                                                      
-                fp = fingerprint_headers(headers) 
-                core = new_vals.get("core_mappings", {}) 
-                custom = new_vals.get("custom_mappings", {}) 
-                mapping_list = [ 
-                    {"source_column": col, "target_attribute": tgt} 
-                    for tgt, col in {**core, **{v: k for k, v in custom.items()}}.items() 
-                ] 
-                log_corrections(mapping_list, profile.get("profiles", []), fingerprint=fp) 
-        except Exception as exc: 
-            logger.warning(f"interactive | log_corrections failed: {exc}") 
-        return { 
-            "status": "complete", 
-            "thread_id": req.thread_id, 
-            "phase": "complete", 
-            "generated_files": files, 
-            "message": new_vals.get("messages", [{}])[-1].get("content", "") if new_vals.get("messages") else "", 
-        } 
-
-
-    next_output = new_vals.get(new_phase, {}) 
-    return { 
-        "status": "continue", 
-        "thread_id": req.thread_id, 
-        "phase": new_phase, 
-        "explanation": next_output.get("explanation", ""), 
-        "reasoning": next_output.get("reasoning", ""), 
-        "suggestions": next_output.get("suggestions", []), 
-        "message": new_vals.get("messages", [{}])[-1].get("content", "") if new_vals.get("messages") else "",
-    } 
+    return StreamingResponse(event_stream(), media_type="text/event-stream") 
 
 
 @app.post("/interactive/status")

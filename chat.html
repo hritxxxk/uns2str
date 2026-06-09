@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>VinAI Data Onboarding</title>
+<title>wee</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 
 <style>
@@ -466,7 +466,7 @@ body{
   <header class="topbar">
     <div class="topbar-left">
       <div class="logo-badge">AI</div>
-      <h3>VinAI Onboarding</h3>
+      <h3>wee</h3>
       <span class="model-pill">Interactive 4-Phase</span>
     </div>
     <div class="topbar-right">
@@ -803,7 +803,7 @@ function startOnboarding(filePath, sheetName) {
   setInputEnabled(false);
   status('Starting onboarding...');
 
-  addMessage('user', `📁 Onboarding file: <strong>${filePath}</strong>${sheetName ? ` (sheet: ${sheetName})` : ''}`);
+  addMessage('user', `Onboarding file: <strong>${filePath}</strong>${sheetName ? ` (sheet: ${sheetName})` : ''}`);
 
   fetch('/interactive/start', {
     method: 'POST',
@@ -929,7 +929,7 @@ async function approvePhase(approved, feedback) {
 
 function showFilePicker() {
   addMessage('ai', `
-    👋 Hi! I'm ready to help you onboard your product data into the PIM.
+    Hi! I'm ready to help you onboard your product data into the PIM.
 
     <p>We'll work through <strong>4 steps</strong> together:</p>
     <p>

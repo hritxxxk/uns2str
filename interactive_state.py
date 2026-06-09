@@ -5,7 +5,8 @@ PhaseOutput   — captures AI explanation + user feedback per phase.
 InteractiveIngestionState — full graph state with phase tracking.
 """
 
-from typing import Optional, TypedDict
+import operator
+from typing import Annotated, Optional, TypedDict
 from enum import Enum
 
 
@@ -51,7 +52,7 @@ class InteractiveIngestionState(TypedDict):
     reasoning and the user's resolution for later rendering.
     """
     # ── Conversation ────────────────────────────────────────
-    messages: list
+    messages: Annotated[list, operator.add]   # append, don't replace
     file_path: str
     sheet_name: str | None
     profile_data: dict | None
@@ -59,6 +60,7 @@ class InteractiveIngestionState(TypedDict):
     # ── Phase tracking ──────────────────────────────────────
     current_phase: str       # "categories"|"attributes"|"references"|"products"|"complete"
     phases_completed: list   # e.g. ["categories", "attributes"]
+    completed_phases: list[str]  # deterministic milestone tracker for agent grounding
 
     # ── Per-phase outputs ───────────────────────────────────
     categories: PhaseOutput
@@ -69,6 +71,9 @@ class InteractiveIngestionState(TypedDict):
     # ── Multi-sheet merge ───────────────────────────────────
     all_sheets: list
     sheet_merge: dict
+
+    # ── Agent loop budget ───────────────────────────────────
+    remaining_steps: int          # max tool call iterations before forcing conversational response
 
     # ── Preserved for downstream rendering ──────────────────
     core_mappings: dict[str, str]

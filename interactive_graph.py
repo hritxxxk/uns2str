@@ -6,8 +6,16 @@ from dotenv import load_dotenv
 from google import genai as google_genai
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.prebuilt import ToolNode, tools_condition
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.tools import tool
+from typing import Annotated
+from langgraph.prebuilt import InjectedState
 
 import re
+
+import openpyxl
+import json as _json
 
 from interactive_state import InteractiveIngestionState, PhaseOutput
 from helpers import (
@@ -130,6 +138,11 @@ def _validate_mappings(headers: list[str], mapping_data: list[dict], sample_rows
 
 def triage_interactive(state: InteractiveIngestionState) -> dict:
     """Open file, detect sheets/headers, seed profile_data and greeting."""
+    # Skip if already profiled (e.g. on re-invoke from respond handler)
+    if state.get("profile_data") is not None and state.get("profile_data", {}).get("headers"):
+        logger.debug("triage | already profiled — skipping")
+        return {}
+
     path = state["file_path"]
     ext = os.path.splitext(path)[1].lower()
     sheet_name = state.get("sheet_name")
@@ -205,13 +218,13 @@ def triage_interactive(state: InteractiveIngestionState) -> dict:
             wb = openpyxl.load_workbook(path, read_only=True, data_only=True) 
             for sn in sheets: 
                 ws = wb[sn] 
-                header_row = None
+                sheet_headers = None
                 for r in ws.iter_rows(max_row=5, values_only=True):
                     vals = [str(c).strip() if c else "" for c in r]
                     if any(v for v in vals if v):
-                        header_row = vals
+                        sheet_headers = vals
                         break
-                first_row = header_row if header_row else [] 
+                first_row = sheet_headers if sheet_headers else [] 
                 sh = [str(c).strip() if c else "" for c in first_row] 
                 state["all_sheets"].append({ 
                     "name": sn, 
@@ -232,10 +245,11 @@ def triage_interactive(state: InteractiveIngestionState) -> dict:
     state["custom_mappings"] = {}
     state["mapping_confidence"] = {}
     state["generated_files"] = []
+    state["remaining_steps"] = 0
 
     # Build a greeting message
     greeting = (
-        f"👋 I've loaded <strong>{os.path.basename(path)}</strong> "
+        f"I've loaded <strong>{os.path.basename(path)}</strong> "
         f"({row_count} rows, {column_count} columns on sheet "
         f"'{sheet_name}').\n\n"
         f"Here is the plan we will work through 4 steps together:\n\n"
@@ -245,15 +259,34 @@ def triage_interactive(state: InteractiveIngestionState) -> dict:
         f"4. <strong>Products</strong> — I will compile the final template\n\n"
         f"Ready to start with <strong>Categories</strong>?"
     )
-    state.setdefault("messages", []).append({
-        "role": "assistant", "content": greeting,
-    })
-
     logger.info(f"triage | file={path} | rows={row_count} | cols={column_count}")
-    return state
 
+    # Return only deltas — reducer appends to existing state without duplication
+    return {
+        "messages": [{"role": "assistant", "content": greeting}],
+        "profile_data": {
+            "headers": headers,
+            "sample_rows": [],
+            "row_count": row_count,
+            "column_count": column_count,
+            "header_row": header_row,
+            "data_start_row": data_start_row,
+        },
+        "sheet_name": sheet_name,
+        "all_sheets": state.get("all_sheets", []),
+        "categories": _make_empty_phase(),
+        "attributes": _make_empty_phase(),
+        "references": _make_empty_phase(),
+        "products": _make_empty_phase(),
+        "current_phase": "categories",
+        "phases_completed": [],
+        "core_mappings": {},
+        "custom_mappings": {},
+        "mapping_confidence": {},
+        "generated_files": [],
+        "remaining_steps": 0,
+    }
 
-# ─── Categories Phase Node ───────────────────────────────────────
 
 # ─── Categories Phase Node ───────────────────────────────────────
 
@@ -276,8 +309,11 @@ Return JSON: {{"answer": "your response here"}}
     return result.get("answer", "I don't have that information about your categories.")
 
 
-def parse_category_feedback(feedback: str) -> dict:
-    prompt = f""" 
+def parse_category_feedback(feedback: str, headers: list | None = None) -> dict:
+    header_hint = ""
+    if headers:
+        header_hint = "Actual column names in the file: " + ", ".join(headers[:30])
+    prompt = f"""
 Analyze this user feedback for product category onboarding. 
 
 If the user is asking about something NOT related to PIM/product categories (e.g. general chat, jokes, weather, programming help), 
@@ -285,7 +321,9 @@ set is_off_topic = true and provide a polite redirect.
 
 If the user is responding to a merge question (saying yes/no to linking sheets), set is_merge_approval or is_merge_rejection. 
 
-Otherwise, determine if they are explicitly asking to combine or build the category tree from specific columns. 
+Otherwise, determine if they are explicitly asking to combine or build the category tree from specific columns.
+Match the user's column names to the actual headers listed below. Return the EXACT header names as they appear in the file.
+{header_hint} 
 
 User feedback: "{feedback}" 
 
@@ -323,6 +361,11 @@ def build_paths_from_generator(file_path: str, sheet_name: str | None, columns: 
         col_clean = col.strip()
         if col_clean in headers:
             col_indices.append(headers.index(col_clean))
+        else:
+            # Case-insensitive fallback
+            match = [h for h in headers if h.lower() == col_clean.lower()]
+            if match:
+                col_indices.append(headers.index(match[0]))
     if not col_indices:
         return []
     paths = set()
@@ -432,7 +475,8 @@ Return JSON:
     # ── Intent parsing bypass ────────────────────────────────
     merged_path = None
     if feedback:
-        decision = parse_category_feedback(feedback)
+        headers_for_parse = state.get("profile_data", {}).get("headers", [])
+        decision = parse_category_feedback(feedback, headers_for_parse)
         if decision.get("is_merge_approval") or decision.get("is_merge_rejection"):
             state["sheet_merge"]["user_responded"] = True
             if decision.get("is_merge_approval"):
@@ -499,7 +543,7 @@ Return JSON:
             return state
 
     # ── Standard extraction via agents.py ────────────────────
-    profile = state.get("profile_data", {})
+    profile = state.get("profile_data", {}) or {}
     headers = profile.get("headers", [])
 
     cat_state = {
@@ -700,7 +744,7 @@ def _detect_eav_format(headers: list, rows: list) -> dict:
 
 
 def _read_metadata_rows(state) -> str:
-    profile = state.get("profile_data", {})
+    profile = state.get("profile_data", {}) or {}
     hr = profile.get("header_row", 0)
     dr = profile.get("data_start_row", hr + 1)
     if dr <= hr + 1:
@@ -758,7 +802,7 @@ JSON:
 
 
 def attributes_phase(state: InteractiveIngestionState) -> dict:
-    profile = state.get("profile_data", {})
+    profile = state.get("profile_data", {}) or {}
     headers = profile.get("headers", [])
     feedback = state.get("attributes", {}).get("user_feedback", "")
     cycle = state.get("attributes", {}).get("correction_cycle", 0)
@@ -1131,7 +1175,7 @@ JSON:
 
 
 def references_phase(state: InteractiveIngestionState) -> dict:
-    profile = state.get("profile_data", {})
+    profile = state.get("profile_data", {}) or {}
     headers = profile.get("headers", [])
     feedback = state.get("references", {}).get("user_feedback", "")
 
@@ -1315,7 +1359,7 @@ JSON:
 
 
 def products_phase(state: InteractiveIngestionState) -> dict:
-    profile = state.get("profile_data", {})
+    profile = state.get("profile_data", {}) or {}
     headers = profile.get("headers", [])
     row_count = profile.get("row_count", 0)
     column_count = profile.get("column_count", 0)
@@ -1540,58 +1584,793 @@ def render_interactive(state: InteractiveIngestionState) -> dict:
     return state
 
 
-# ─── Router ──────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════
+# AGENT TOOLS — Called by LLM via ToolNode
+# Each tool:
+#   - Accepts only LLM-facing args (file path, sheet name, column hints)
+#   - Reads state via InjectedState for programmatic context
+#   - Returns a string result for the LLM to read
+#   - Writes structured data directly to state
+# ═══════════════════════════════════════════════════════════════
 
-def route_by_phase(state: InteractiveIngestionState) -> str:
-    """Return the next phase name, or 'complete' to trigger render."""
-    phase = state.get("current_phase", "categories")
-    completed = state.get("phases_completed", [])
+from typing import Annotated
+from langgraph.prebuilt import InjectedState
 
-    if phase == "complete":
-        return "render"
-    if phase in ("categories", "attributes", "references", "products"):
-        return phase
-    return "categories"
+
+@tool
+def profile_file(
+    file_path: str,
+    sheet_name: str | None = None,
+    state: Annotated[dict, InjectedState()] = None,
+) -> str:
+    """Analyse a spreadsheet structure. Call first on new files.
+    Detects headers, rows, columns, and cached mappings.
+
+    Args:
+        file_path: Path to CSV/XLSX/XLS file.
+        sheet_name: Sheet name (auto-detected if omitted).
+    """
+    import json as _json
+    # Resolve file path — LLM may pass bare filename missing uploads/ prefix
+    if not os.path.exists(file_path):
+        state_path = state.get("file_path", "") if state else ""
+        if state_path and os.path.exists(state_path):
+            file_path = state_path
+        else:
+            trial = os.path.join("uploads", os.path.basename(file_path))
+            if os.path.exists(trial):
+                file_path = trial
+
+    ext = os.path.splitext(file_path)[1].lower()
+    # Detect header row & sheet
+    if not sheet_name:
+        if ext in (".xlsx", ".xls"):
+            wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
+            sheet_name = wb.sheetnames[0]
+            wb.close()
+        else:
+            sheet_name = "auto-detect"
+
+    gen = read_file(file_path, sheet_name)
+    first_rows = take_rows(gen, 20)
+
+    from agents import detect_header_via_llm
+    header_row, data_start_row = detect_header_via_llm(first_rows)
+
+    headers = [str(c) if c is not None else "" for c in first_rows[header_row]]
+    if data_start_row < header_row + 1:
+        data_start_row = header_row + 1
+
+    # Count rows
+    row_count = len(first_rows)  # partial — full count from existing triage if available
+    try:
+        all_rows = list(read_file(file_path, sheet_name))
+        row_count = len(all_rows) - data_start_row
+        if row_count < 0:
+            row_count = 0
+    except Exception:
+        pass
+
+    # Profile columns
+    data_rows = list(read_file(file_path, sheet_name)) if row_count > 20 else all_rows
+    hr = header_row
+    dr = max(data_start_row, hr + 1)
+    data_rows_list = list(data_rows) if not isinstance(data_rows, list) else data_rows
+    try:
+        gen2 = read_file(file_path, sheet_name)
+        for _ in range(dr):
+            next(gen2, None)
+        data_rows_list = list(gen2)
+    except Exception:
+        data_rows_list = []
+
+    cols = []
+    for ci, h in enumerate(headers):
+        vals = []
+        for row in data_rows_list:
+            if ci < len(row) and row[ci] is not None and str(row[ci]).strip():
+                vals.append(str(row[ci]))
+        uniq = list(set(vals))
+        sample = (uniq[:3] + uniq[-2:]) if len(uniq) > 5 else uniq
+        cols.append({
+            "name": h,
+            "non_null": len(vals),
+            "unique": len(uniq),
+            "sample": sample,
+            "unique_values": uniq if len(uniq) <= 100 else [],
+        })
+
+    fp = fingerprint_headers(headers)
+    cached = load_cached_mapping(fp)
+
+    # Collect multi-sheet metadata
+    all_sheets = []
+    if ext in (".xlsx", ".xls"):
+        try:
+            wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
+            for sn in wb.sheetnames:
+                ws = wb[sn]
+                sh = [str(c).strip() if c else "" for c in next(ws.iter_rows(max_row=1, values_only=True), [])]
+                all_sheets.append({"name": sn, "headers": [h for h in sh if h], "row_count": ws.max_row or 0})
+            wb.close()
+        except Exception:
+            pass
+
+    # Write to state
+    state["sheet_name"] = sheet_name
+    state["profile_data"] = {
+        "headers": headers,
+        "sample_rows": [{headers[i]: str(r[i])[:60] for i in range(min(len(headers), len(r))) if r[i] is not None and str(r[i]).strip()} for r in data_rows_list[:3]],
+        "row_count": row_count,
+        "column_count": len(headers),
+        "header_row": header_row,
+        "data_start_row": data_start_row,
+        "profiles": cols,
+        "category_hierarchy": [],
+    }
+    state["all_sheets"] = all_sheets
+
+    # Initialize empty phase outputs
+    state["categories"] = _make_empty_phase()
+    state["attributes"] = _make_empty_phase()
+    state["references"] = _make_empty_phase()
+    state["products"] = _make_empty_phase()
+    state["core_mappings"] = {}
+    state["custom_mappings"] = {}
+    state["mapping_confidence"] = {}
+    state["generated_files"] = []
+    state["product_rows"] = []
+
+    # Mark phase complete
+    state.setdefault("completed_phases", [])
+    if "triage" not in state["completed_phases"]:
+        state["completed_phases"].append("triage")
+
+    cache_note = f" I also found {len(cached)} saved mappings from a previous session." if cached else ""
+    return (
+        f"Profiled **{os.path.basename(file_path)}** — sheet **{sheet_name}**, "
+        f"{row_count} rows, {len(headers)} columns.{cache_note}\n\n"
+        f"Headers: {', '.join(headers[:10])}{'...' if len(headers) > 10 else ''}"
+    )
+
+
+@tool
+def extract_categories(
+    file_path: str,
+    sheet_name: str | None = None,
+    specified_columns: list[str] | None = None,
+    state: Annotated[dict, InjectedState()] = None,
+) -> str:
+    """Extract product category hierarchy from spreadsheet columns.
+    Uses 5-strategy fallback. Pass specified_columns if you know which cols.
+
+    Args:
+        file_path: Path to source file.
+        sheet_name: Sheet name (omit for profiled sheet).
+        specified_columns: Column names to join as category path.
+    """
+    # Resolve file path — LLM may pass bare filename missing uploads/ prefix
+    if not os.path.exists(file_path):
+        state_path = state.get("file_path", "")
+        if state_path and os.path.exists(state_path):
+            file_path = state_path
+        else:
+            trial = os.path.join("uploads", os.path.basename(file_path))
+            if os.path.exists(trial):
+                file_path = trial
+
+    if not sheet_name:
+        sheet_name = state.get("sheet_name")
+
+    profile = state.get("profile_data", {}) or {}
+    headers = profile.get("headers", [])
+
+    state.setdefault("completed_phases", [])
+    if "categories" not in state["completed_phases"]:
+        state["completed_phases"].append("categories")
+
+    if specified_columns:
+        # Direct reconstruction from user-specified columns
+        updated_paths = build_paths_from_generator(file_path, sheet_name, specified_columns)
+        if updated_paths:
+            state["profile_data"]["category_hierarchy"] = updated_paths
+            state["categories"] = PhaseOutput(
+                explanation=f"Built from columns: {', '.join(specified_columns)}",
+                reasoning=f"Programmatic extraction from {len(specified_columns)} columns",
+                suggestions=[{"type": "item", "label": p, "confidence": 100, "reasoning": "Direct column extraction"} for p in updated_paths],
+                approved=True,
+                user_feedback="",
+            )
+            path_summary = "\n".join(f"- {p}" for p in updated_paths[:8])
+            return (
+                f"Extracted **{len(updated_paths)}** category paths from columns "
+                f"{', '.join(specified_columns)}.\n\n"
+                f"{path_summary}"
+                + (f"\n\n+{len(updated_paths) - 8} more paths" if len(updated_paths) > 8 else "")
+            )
+        return "Could not extract paths from those columns. Try different column names."
+
+    # Standard 5-strategy fallback
+    cat_state = {
+        "source_path": file_path,
+        "sheet_name": sheet_name,
+        "headers": headers,
+        "header_row": profile.get("header_row", 0),
+        "data_start_row": profile.get("data_start_row", 1),
+        "category_candidates": [],
+        "category_path_config": {},
+        "category_hierarchy": [],
+        "need_user_input": False,
+        "is_known_schema": False,
+        "mapping": [],
+        "sample_rows": [],
+        "row_count": profile.get("row_count", 0),
+    }
+
+    from agents import resolve_category_paths
+    resolve_category_paths(cat_state)
+
+    paths = cat_state.get("category_hierarchy", [])
+    explanation = cat_state.get("category_reasoning", "")
+    needs_input = cat_state.get("need_user_input", False)
+
+    state["profile_data"]["category_hierarchy"] = paths
+    state["categories"] = PhaseOutput(
+        explanation=explanation or f"Discovered {len(paths)} category paths.",
+        reasoning=f"Strategy fallback chain on {len(paths)} paths.",
+        suggestions=[{"type": "item", "label": p, "confidence": 95, "reasoning": "Part of product hierarchy"} for p in paths],
+        approved=not needs_input,
+        user_feedback="",
+    )
+
+    if not paths:
+        return "I wasn't able to detect a clear category hierarchy from this file."
+
+    path_summary = "\n".join(f"- {p}" for p in paths[:8])
+    return (
+        f"Discovered **{len(paths)}** category paths.\n\n{path_summary}"
+        + (f"\n\n+{len(paths) - 8} more paths" if len(paths) > 8 else "")
+        + ("\n\nSome paths may need review — do they look correct?" if needs_input else "")
+    )
+
+
+@tool
+def map_attributes(
+    file_path: str,
+    sheet_name: str | None = None,
+    feedback: str | None = None,
+    state: Annotated[dict, InjectedState()] = None,
+) -> str:
+    """Map source columns to PIM attributes. Core (sku/code/mrp) + custom.
+    Screens cols in rounds, validates types, caches by fingerprint.
+
+    Args:
+        file_path: Path to source file.
+        sheet_name: Sheet name (omit for profiled sheet).
+        feedback: User correction text (e.g. "combine color and size").
+    """
+    # Resolve file path — LLM may pass bare filename missing uploads/ prefix
+    if not os.path.exists(file_path):
+        state_path = state.get("file_path", "")
+        if state_path and os.path.exists(state_path):
+            file_path = state_path
+        else:
+            trial = os.path.join("uploads", os.path.basename(file_path))
+            if os.path.exists(trial):
+                file_path = trial
+
+    if not sheet_name:
+        sheet_name = state.get("sheet_name")
+
+    profile = state.get("profile_data", {}) or {}
+    headers = profile.get("headers", [])
+
+    # Read data
+    gen = read_file(file_path, sheet_name)
+    hr = profile.get("header_row", 0)
+    dr = profile.get("data_start_row", hr + 1)
+    for _ in range(dr):
+        next(gen, None)
+    all_data_rows = list(gen)
+
+    fp = fingerprint_headers(headers)
+    cached = load_cached_mapping(fp)
+    state.setdefault("completed_phases", [])
+    if cached and not feedback:
+        state["core_mappings"] = {}
+        state["custom_mappings"] = {}
+        for m in cached:
+            tgt = m.get("target_attribute", "")
+            src = m.get("source_column", "")
+            if tgt in ("sku_name", "code", "mrp"):
+                state["core_mappings"][tgt] = src
+            else:
+                state["custom_mappings"][src] = src
+        state["attributes"] = PhaseOutput(
+            explanation=f"Loaded {len(cached)} mappings from cache.",
+            reasoning="Fingerprint cache hit.",
+            suggestions=[],
+            approved=False,
+            user_feedback="",
+        )
+        if "attributes" not in state["completed_phases"]:
+            state["completed_phases"].append("attributes")
+        return f"Loaded **{len(cached)}** saved mappings from a previous session (fingerprint: {fp})."
+
+    # Step 1: Column screening (adaptive sampling)
+    max_sample = min(len(all_data_rows), 500)
+    sample_size = min(50, max_sample)
+    sampling_round = 0
+    max_sampling_rounds = 3
+    needs_more = True
+    attr_columns = []
+
+    while needs_more and sampling_round < max_sampling_rounds and sample_size <= max_sample:
+        sampling_round += 1
+        current_rows = all_data_rows[:sample_size]
+        sample_rows = current_rows[:5]
+        samples = [{h: str(r[i]).strip()[:80] for i, h in enumerate(headers) if i < len(r) and r[i] is not None and str(r[i]).strip()} for r in sample_rows]
+
+        col_names_text = "\n".join(f"{i+1}. {h}" for i, h in enumerate(headers[:60]))
+        screen_prompt = SCREENING_PROMPT.format(
+            filename=os.path.basename(file_path),
+            column_names=col_names_text,
+            samples=_json.dumps(samples, indent=2),
+            sample_count=sample_size,
+            metadata_context="",
+            eav_info="(standard columnar format)",
+        )
+        screen_result = _llm_json(screen_prompt)
+        attr_columns = screen_result.get("attribute_columns", [])
+        needs_more = screen_result.get("needs_more_samples", False)
+        if needs_more:
+            sample_size = min(sample_size * 2, max_sample)
+
+    if not attr_columns:
+        attr_columns = [h for h in headers if h.strip()]
+
+    # Step 2: Profile + mapping
+    cols = profile_columns.invoke({"headers": headers, "rows": all_data_rows})
+    filtered_profiles = [{"name": c["name"], "unique": c["unique"], "non_null": c["non_null"], "sample": c["sample"][:3]} for c in cols if c["name"] in attr_columns]
+
+    sample_rows = all_data_rows[:5]
+    samples = [{h: str(r[i]).strip()[:80] for i, h in enumerate(headers) if i < len(r) and r[i] is not None and str(r[i]).strip()} for r in sample_rows]
+
+    few_shots_text = "(no historical corrections available)"
+    if not feedback:
+        few_shots = []
+        seen = set()
+        for h in attr_columns[:10]:
+            vals = [str(r[headers.index(h)]).strip()[:40] for r in all_data_rows if headers.index(h) < len(r) and r[headers.index(h)] is not None and str(r[headers.index(h)]).strip()]
+            if vals:
+                matches = fetch_similar_examples(h, vals, k=2)
+                for m in matches:
+                    tgt = m["target_attribute"]
+                    if tgt and tgt not in seen:
+                        few_shots.append(m)
+                        seen.add(tgt)
+                        if len(few_shots) >= 5:
+                            break
+            if len(few_shots) >= 5:
+                break
+        if few_shots:
+            few_shots_text = "\n".join(f'- "{fs["column_name"]}" → {fs["target_attribute"]} ({fs["attribute_type"]})' for fs in few_shots)
+
+    map_prompt = MAPPING_PROMPT.format(
+        filename=os.path.basename(file_path),
+        profiles=_json.dumps(filtered_profiles[:40], indent=2),
+        samples=_json.dumps(samples, indent=2),
+        few_shots=few_shots_text,
+        feedback=feedback or "(none — first attempt)",
+        validation_errors_text="(none)",
+    )
+    result = _llm_json(map_prompt)
+
+    # Build structured state
+    all_items = []
+    for group in result.get("suggestions", []):
+        if group.get("type") == "group":
+            for item in group.get("items", []):
+                if item.get("type") == "item" and item.get("column") and item.get("mapped_to"):
+                    all_items.append(item)
+
+    core_group = {}
+    custom_group = {}
+    for group in result.get("suggestions", []):
+        if group.get("type") == "group":
+            label = group.get("label", "")
+            for item in group.get("items", []):
+                if item.get("type") == "item":
+                    col = item.get("column", "")
+                    mapped = item.get("mapped_to", "")
+                    if label == "High-Confidence Core Mappings" and mapped:
+                        core_group[mapped] = col
+                    elif label == "Custom Dynamic Attributes":
+                        custom_group[col] = col
+
+    state["core_mappings"] = core_group
+    state["custom_mappings"] = custom_group
+
+    # Cache successful mappings
+    cache_data = [{"source_column": it["column"], "target_attribute": it["mapped_to"],
+                    "attribute_type": it.get("attribute_type", "Textbox"),
+                    "attribute_data_type": it.get("attribute_data_type", "varchar")}
+                   for it in all_items]
+    save_cached_mapping(fp, cache_data)
+
+    state["attributes"] = PhaseOutput(
+        explanation=result.get("explanation", "Attribute mapping complete."),
+        reasoning=result.get("reasoning", ""),
+        suggestions=result.get("suggestions", []),
+        approved=False,
+        user_feedback="",
+    )
+
+    if "attributes" not in state["completed_phases"]:
+        state["completed_phases"].append("attributes")
+
+    return (
+        f"Mapped **{len(core_group) + len(custom_group)}** attributes "
+        f"({len(core_group)} core + {len(custom_group)} custom).\n\n"
+        + ("\n".join(f"- `{col}` → **{tgt}**" for tgt, col in core_group.items())
+           if core_group else "No core mappings identified.")
+        + ("\n\nCustom attributes ready for review." if custom_group else "")
+    )
+
+
+@tool
+def extract_references(
+    state: Annotated[dict, InjectedState()] = None,
+) -> str:
+    """Extract unique values for Dropdown/MultiSelect attributes.
+    Reads mappings from state. Call after map_attributes.
+    No args needed."""
+    profile = state.get("profile_data", {}) or {}
+    headers = profile.get("headers", [])
+    cols = profile.get("profiles", [])
+
+    if not cols and headers:
+        # Profile columns if not already profiled
+        try:
+            gen = read_file(state.get("file_path", ""), state.get("sheet_name"))
+            hr = profile.get("header_row", 0)
+            dr = profile.get("data_start_row", hr + 1)
+            for _ in range(dr):
+                next(gen, None)
+            data_rows = list(gen)
+            cols = profile_columns.invoke({"headers": headers, "rows": data_rows})
+        except Exception:
+            cols = []
+
+    # Build mapping dicts from state
+    mapping_dicts = []
+    for target, col in state.get("core_mappings", {}).items():
+        if col:
+            mapping_dicts.append({"source_column": col, "target_attribute": target, "attribute_type": "Textbox"})
+    for col, preserved in state.get("custom_mappings", {}).items():
+        mapping_dicts.append({"source_column": col, "target_attribute": preserved, "attribute_type": "Dropdown"})
+
+    refs = extract_reference_values.invoke({"mappings": mapping_dicts, "profiles": cols})
+
+    suggestions = []
+    for master_name, values in refs.items():
+        suggestions.append({
+            "type": "item",
+            "label": master_name.replace(" Master", ""),
+            "column": master_name,
+            "unique_count": len(values),
+            "values": values[:20],
+            "messy_values": [],
+            "normalizations": [],
+        })
+
+    state["references"] = PhaseOutput(
+        explanation=f"Extracted {len(suggestions)} reference masters.",
+        reasoning="Programmatic extraction from column profiles.",
+        suggestions=suggestions,
+        approved=False,
+        user_feedback="",
+    )
+
+    state.setdefault("completed_phases", [])
+    if "references" not in state["completed_phases"]:
+        state["completed_phases"].append("references")
+
+    if not suggestions:
+        return "No Dropdown or MultiSelect attributes found — no reference masters to extract."
+
+    summary = "\n".join(f"- **{s['label']}**: {s['unique_count']} values — {', '.join(str(v) for v in s['values'][:5])}" for s in suggestions)
+    return (
+        f"Extracted **{len(suggestions)}** reference masters.\n\n{summary}"
+    )
+
+
+@tool
+def build_products(
+    state: Annotated[dict, InjectedState()] = None,
+) -> str:
+    """Build product rows from confirmed mappings + source data.
+    Validates image URLs. Call after map_attributes + extract_references.
+    No args needed."""
+    profile = state.get("profile_data", {}) or {}
+    headers = profile.get("headers", [])
+    row_count = profile.get("row_count", 0)
+
+    # Read data rows
+    gen = read_file(state.get("file_path", ""), state.get("sheet_name"))
+    hr = profile.get("header_row", 0)
+    dr = profile.get("data_start_row", hr + 1)
+    for _ in range(dr):
+        next(gen, None)
+    all_data_rows = list(gen)
+
+    # Build row mappings from state
+    row_mappings = []
+    for target, col in state.get("core_mappings", {}).items():
+        if col:
+            row_mappings.append({"source_column": col, "target_attribute": target})
+    for col, preserved in state.get("custom_mappings", {}).items():
+        row_mappings.append({"source_column": col, "target_attribute": preserved})
+
+    img_cols = extract_image_columns(headers, row_mappings)
+    product_rows = build_product_rows(
+        headers, all_data_rows, row_mappings, img_cols, state.get("core_mappings"),
+    )
+
+    # Image URL validation
+    img_url_count = 0
+    img_broken = 0
+    img_samples = []
+    for pr in product_rows:
+        for ii in range(1, 10):
+            url = pr.get(f"image_{ii}", "")
+            if url and isinstance(url, str) and url.strip():
+                img_url_count += 1
+                url = url.strip()
+                if not url.startswith("http"):
+                    img_broken += 1
+                    if len(img_samples) < 3:
+                        img_samples.append(url)
+
+    img_warning = ""
+    if img_url_count > 0 and (img_broken / max(img_url_count, 1)) > 0.3:
+        pct = int(100 * img_broken / img_url_count)
+        img_warning = f"\n\n⚠️ **{pct}% of image links appear invalid** (e.g. '{img_samples[0] if img_samples else ''}')."
+
+    attr_count = len(state.get("core_mappings", {})) + len(state.get("custom_mappings", {}))
+    total_cols = 6 + attr_count + min(len(img_cols), 9)
+
+    state["product_rows"] = product_rows
+    state["products"] = PhaseOutput(
+        explanation=f"Built {len(product_rows)} product rows across {total_cols} columns." + img_warning,
+        reasoning=f"{row_count} source rows, {attr_count} attributes, {len(img_cols)} image columns",
+        suggestions=[],
+        approved=False,
+        user_feedback="",
+    )
+
+    state.setdefault("completed_phases", [])
+    if "products" not in state["completed_phases"]:
+        state["completed_phases"].append("products")
+
+    return (
+        f"Built **{len(product_rows)}** product rows across **{total_cols}** columns "
+        f"({6} fixed + {attr_count} attributes + {min(len(img_cols), 9)} image)."
+        + img_warning
+    )
+
+
+@tool
+def render_templates(
+    state: Annotated[dict, InjectedState()] = None,
+) -> str:
+    """Generate 4 PIM xlsx files (category/attribute/reference/product).
+    Final step. No args needed."""
+    fp = fingerprint_headers(state.get("profile_data", {}).get("headers", []))
+    headers = state.get("profile_data", {}).get("headers", [])
+    cats = state.get("profile_data", {}).get("category_hierarchy", [])
+
+    from state import ColumnMapping
+
+    # Build mapping objects
+    mapping_objs = []
+    for target, col in state.get("core_mappings", {}).items():
+        if col:
+            mapping_objs.append(ColumnMapping(source_column=col, target_attribute=target, confidence=1.0))
+    for col, preserved in state.get("custom_mappings", {}).items():
+        mapping_objs.append(ColumnMapping(source_column=col, target_attribute=preserved, confidence=1.0))
+
+    if not mapping_objs:
+        return "No attribute mappings found. Please run map_attributes first."
+
+    # Build attribute definitions
+    attr_defs = build_attribute_definitions.invoke({"mappings": mapping_objs})
+
+    # Extract references from state
+    mapping_dicts = [
+        {"source_column": m.source_column, "target_attribute": m.target_attribute, "attribute_type": m.attribute_type}
+        for m in mapping_objs
+    ]
+    profiles_list = state.get("profile_data", {}).get("profiles", [])
+    refs = extract_reference_values.invoke({"mappings": mapping_dicts, "profiles": profiles_list})
+
+    # Read all data rows
+    rows = read_file(state["file_path"], state.get("sheet_name"))
+    hr = state.get("profile_data", {}).get("header_row", 0)
+    dr = max(state.get("profile_data", {}).get("data_start_row", hr + 1), hr + 1)
+    for _ in range(dr):
+        next(rows, None)
+
+    img_cols = extract_image_columns(headers, mapping_dicts)
+    row_mappings = [{"source_column": m.source_column, "target_attribute": m.target_attribute} for m in mapping_objs]
+    product_rows = build_product_rows(
+        headers, rows, row_mappings, img_cols, state.get("core_mappings"),
+    )
+
+    # Download blank templates if JWT available
+    jwt = state.get("jwt_token", "")
+    blank_cat = download_blank_template(jwt, "category") if jwt else ""
+    blank_attr = download_blank_template(jwt, "attribute") if jwt else ""
+
+    attr_names = [m.target_attribute for m in mapping_objs]
+    files = render_all_templates.invoke({
+        "fingerprint": fp,
+        "category_hierarchy": cats,
+        "attribute_definitions": attr_defs,
+        "reference_values": refs,
+        "headers": headers,
+        "product_rows": product_rows,
+        "attr_names": attr_names,
+        "blank_category_path": blank_cat,
+        "blank_attribute_path": blank_attr,
+    })
+
+    state["generated_files"] = list(files.values())
+    state["product_rows"] = product_rows
+
+    state.setdefault("completed_phases", [])
+    if "render" not in state["completed_phases"]:
+        state["completed_phases"].append("render")
+
+    file_list = "\n".join(f"- `{v.split('/')[-1]}`" for v in files.values())
+    return (
+        f"✅ Generated **{len(files)}** PIM template files:\n\n{file_list}\n\n"
+        f"They're saved to the output directory and ready to download."
+    )
+
+
+# ─── Agent Reason Node ──────────────────────────────────────────
+
+AGENT_SYSTEM_PROMPT = """You are VinGPT, a PIM data onboarding assistant. Guide users from messy spreadsheet to 4 standardized PIM templates.
+
+## Milestones (strict order — check completed_phases before acting)
+1. triage (auto): file loaded & profiled
+2. categories → extract_categories  | 3. attributes → map_attributes
+4. references → extract_references  | 5. products → build_products
+6. render → render_templates
+
+Do NOT skip ahead. If a milestone isn't in completed_phases, run it next.
+
+## Rules
+- Explain before calling a tool. Present results clearly and ask confirmation.
+- If a tool returns empty/fails: do NOT retry the same turn. Tell the user what happened, ask a simple yes/no.
+- No jargon: use "missing values" not "null", "column layout" not "schema".
+- Off-topic user? Redirect back to the current phase politely.
+- Max 2 tool calls per turn. After 2, stop and present findings."""
+
+
+def agent_reason_node(state: InteractiveIngestionState) -> dict:
+    """Central reasoning engine — decides whether to call a tool or respond conversationally."""
+    messages = state["messages"]
+    from langchain_core.messages import BaseMessage, SystemMessage
+
+    # If the last message is from assistant (no pending user input), skip LLM call
+    if messages:
+        last = messages[-1]
+        last_is_assistant = (
+            (isinstance(last, BaseMessage) and last.type == "ai") or
+            (isinstance(last, dict) and last.get("role") == "assistant")
+        )
+        if last_is_assistant:
+            logger.debug("agent | no pending user input — skipping LLM call")
+            return {}  # No delta — state unchanged, router routes to END
+
+    # Convert messages — preserve live LangChain objects, convert plain dicts
+    lc_messages = []
+    for msg in messages:
+        if isinstance(msg, BaseMessage):
+            lc_messages.append(msg)
+        elif isinstance(msg, dict):
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            if role == "user":
+                from langchain_core.messages import HumanMessage
+                lc_messages.append(HumanMessage(content=content))
+            elif role == "assistant":
+                from langchain_core.messages import AIMessage
+                lc_messages.append(AIMessage(content=content))
+            else:
+                from langchain_core.messages import HumanMessage
+                lc_messages.append(HumanMessage(content=content))
+
+    # Prepend system prompt
+    lc_messages = [SystemMessage(content=AGENT_SYSTEM_PROMPT)] + lc_messages
+
+    # Build the agent LLM with tools bound
+    agent_tools = [profile_file, extract_categories, map_attributes, extract_references, build_products, render_templates]
+    llm = ChatGoogleGenerativeAI(
+        model="gemini-2.5-flash",
+        temperature=1.0,
+    ).bind_tools(agent_tools)
+
+    response = llm.invoke(lc_messages)
+
+    # Bug 2 Fix: Return ONLY the new response (delta).
+    # Do NOT mutate state['messages'] in-place. Reducer appends it.
+    return {"messages": [response]}
+
+
+# ─── Agent Router ───────────────────────────────────────────────
+
+def route_agent_action(state: InteractiveIngestionState) -> str:
+    """Route based on whether the last message has tool_calls, with a 2-iteration budget."""
+    messages = state.get("messages", [])
+    if not messages:
+        return END
+
+    last = messages[-1]
+
+    # Check if the last message contains tool calls
+    has_tool_calls = hasattr(last, "tool_calls") and last.tool_calls
+
+    if has_tool_calls:
+        budget = state.get("remaining_steps", 0)
+        if budget > 0:
+            state["remaining_steps"] = budget - 1
+            logger.info(f"agent | routing to tools | remaining_steps={budget - 1}")
+            return "execute_tools"
+        else:
+            logger.warning("agent | budget exhausted — forcing conversational response")
+            return END
+
+    logger.info("agent | routing to END (conversational response)")
+    return END
+
+
+# ─── START Router ─────────────────────────────────────────────
+
+def route_start(state: InteractiveIngestionState) -> str:
+    """Route to triage on first run (profile_data empty), bypass to agent on subsequent turns."""
+    if state.get("profile_data") is not None:
+        logger.debug("start | profile_data exists — bypassing triage")
+        return "agent"
+    return "triage"
 
 
 # ─── Graph Assembly ──────────────────────────────────────────────
 
 builder = StateGraph(InteractiveIngestionState)
 
+# Register tools with ToolNode
+agent_tools = [profile_file, extract_categories, map_attributes, extract_references, build_products, render_templates]
+tool_node = ToolNode(agent_tools)
+
 builder.add_node("triage", triage_interactive)
-builder.add_node("categories", categories_phase)
-builder.add_node("attributes", attributes_phase)
-builder.add_node("references", references_phase)
-builder.add_node("products", products_phase)
-builder.add_node("render", render_interactive)
-
-builder.add_edge(START, "triage")
-builder.add_edge("triage", "categories")
-builder.add_edge("render", END)
+builder.add_node("agent", agent_reason_node)
+builder.add_node("execute_tools", tool_node)
 
 builder.add_conditional_edges(
-    "categories",
-    lambda s: route_by_phase(s),
-    {"categories": "categories", "attributes": "attributes",
-     "references": "references", "products": "products", "render": "render"},
+    START,
+    route_start,
+    {"triage": "triage", "agent": "agent"},
 )
+builder.add_edge("triage", "agent")
+builder.add_edge("execute_tools", "agent")
+
 builder.add_conditional_edges(
-    "attributes",
-    lambda s: route_by_phase(s),
-    {"categories": "categories", "attributes": "attributes",
-     "references": "references", "products": "products", "render": "render"},
-)
-builder.add_conditional_edges(
-    "references",
-    lambda s: route_by_phase(s),
-    {"categories": "categories", "attributes": "attributes",
-     "references": "references", "products": "products", "render": "render"},
-)
-builder.add_conditional_edges(
-    "products",
-    lambda s: route_by_phase(s),
-    {"categories": "categories", "attributes": "attributes",
-     "references": "references", "products": "products", "render": "render"},
+    "agent",
+    route_agent_action,
+    {"execute_tools": "execute_tools", END: END},
 )
 
 postgres_uri = os.getenv("POSTGRES_URI")
@@ -1606,5 +2385,4 @@ else:
 
 interactive_graph = builder.compile(
     checkpointer=checkpointer,
-    interrupt_after=["categories", "attributes", "references", "products"],
 )
