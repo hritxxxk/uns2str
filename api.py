@@ -33,6 +33,11 @@ app = FastAPI(
     version="1.0.0",
 )
 
+# Health check
+@app.get("/health")
+async def health():
+    return {"status": "ok", "service": "pim-ingestion-agent", "version": "1.0.0"}
+
 # Serve the chat frontend at root
 @app.get("/")
 async def serve_chat():
