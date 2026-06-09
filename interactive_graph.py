@@ -61,6 +61,22 @@ def _llm_json(prompt: str, temperature: float = 1.0) -> dict:
         return {}
 
 
+def _validate_taxonomy(paths: list[str]) -> tuple[bool, str]:
+    """Check if extracted paths look like real categories or alphanumeric SKUs."""
+    if not paths:
+        return True, ""
+    import re
+    alpha_numeric = sum(1 for p in paths if re.match(r'^[a-zA-Z0-9.\-/]+$', p))
+    long_codes = sum(1 for p in paths if len(p) < 6)
+    if alpha_numeric > len(paths) * 0.5 or long_codes > len(paths) * 0.5:
+        return False, (
+            "The extracted values look like product codes or identifiers rather than "
+            "product categories. Could you tell me which columns in your spreadsheet "
+            "contain the actual categories? For example: 'Department, Category, Subcategory'."
+        )
+    return True, ""
+
+
 def _make_empty_phase() -> PhaseOutput:
     return PhaseOutput(
         explanation="",
@@ -1801,6 +1817,10 @@ def extract_categories(
         # Direct reconstruction from user-specified columns
         updated_paths = build_paths_from_generator(file_path, sheet_name, specified_columns)
         if updated_paths:
+            # Validate: are these actual categories or product codes?
+            is_valid, msg = _validate_taxonomy(updated_paths)
+            if not is_valid:
+                return Command(value=msg)
             state["profile_data"]["category_hierarchy"] = updated_paths
             state["categories"] = PhaseOutput(
                 explanation=f"Built from columns: {', '.join(specified_columns)}",
@@ -1855,6 +1875,9 @@ def extract_categories(
 
     paths = cat_state.get("category_hierarchy", [])
     explanation = cat_state.get("category_reasoning", "")
+    is_valid, msg = _validate_taxonomy(paths)
+    if not is_valid:
+        return Command(value=msg)
     needs_input = cat_state.get("need_user_input", False)
 
     cat_update = {
