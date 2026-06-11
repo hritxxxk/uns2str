@@ -2492,7 +2492,8 @@ Do NOT skip ahead. If a milestone isn't in completed_phases, run it next.
 - No jargon: use "missing values" not "null", "column layout" not "schema".
 - Off-topic user? Redirect back to the current phase politely.
 - If the user asks to see/list/show data, present it directly in your response.
-- Max 2 tool calls per turn. After 2, stop and present findings."""
+- Max 2 tool calls per turn. After 2, stop and present findings.
+- When displaying categories, indent levels with > like: "Apparel > Men > Shirts". Never use * bullets."""
 
 
 def agent_reason_node(state: InteractiveIngestionState) -> dict:
