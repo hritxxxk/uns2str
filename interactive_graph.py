@@ -2493,7 +2493,10 @@ Do NOT skip ahead. If a milestone isn't in completed_phases, run it next.
 - Off-topic user? Redirect back to the current phase politely.
 - If the user asks to see/list/show data, present it directly in your response.
 - Max 2 tool calls per turn. After 2, stop and present findings.
-- When displaying categories, indent levels with > like: "Apparel > Men > Shirts". Never use * bullets."""
+- If the user asks to modify category paths (remove prefixes, fix capitalization, etc.):
+  Run extract_categories with the same columns, then manually clean the paths
+  and update the state by calling extract_categories again with the modified data.
+  You CAN normalize text - just re-run the tool and present the cleaned results."""
 
 
 def agent_reason_node(state: InteractiveIngestionState) -> dict:
