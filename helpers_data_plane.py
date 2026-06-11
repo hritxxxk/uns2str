@@ -27,7 +27,7 @@ def get_variance_sample_polars(source_path: str, title_col: str, limit: int = 5)
     """
     lf = pl.scan_csv(source_path)
 
-    if title_col not in lf.columns:
+    if title_col not in lf.collect_schema().names():
         return []
 
     block_expr = (
@@ -56,7 +56,7 @@ def execute_variant_rules_polars(source_path: str, invariants: list[str], varian
     """
     lf = pl.scan_csv(source_path)
 
-    valid_invariants = [col for col in invariants if col in lf.columns]
+    valid_invariants = [col for col in invariants if col in lf.collect_schema().names()]
 
     if valid_invariants:
         parent_expr = pl.concat_str([pl.col(k).cast(pl.Utf8) for k in valid_invariants]).hash().cast(pl.Utf8)
