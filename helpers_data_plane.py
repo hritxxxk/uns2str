@@ -1,9 +1,11 @@
 import os
 import math
 import logging
+import warnings
 import polars as pl
 
 logger = logging.getLogger("pim_data_plane")
+warnings.filterwarnings("ignore", message="Could not determine dtype")
 
 
 def _detect_sheet(path, preferred=None):
@@ -24,10 +26,7 @@ def _lazy_or_read(path):
     """Return a LazyFrame regardless of file format (CSV or xlsx)."""
     if path.endswith(".csv"):
         return pl.scan_csv(path)
-    import warnings
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        df = pl.read_excel(path, engine="calamine", has_header=True)
+    df = pl.read_excel(path, engine="calamine", has_header=True)
     return df.lazy()
 
 
