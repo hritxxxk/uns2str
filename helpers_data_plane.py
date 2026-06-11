@@ -5,6 +5,7 @@ import warnings
 import polars as pl
 
 logger = logging.getLogger("pim_data_plane")
+logging.getLogger("polars").setLevel(logging.ERROR)
 warnings.filterwarnings("ignore", message="Could not determine dtype")
 
 

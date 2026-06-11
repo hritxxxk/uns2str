@@ -44,6 +44,7 @@ class VariantRule(BaseModel):
     explanation: str = Field(description="Conversational explanation of how you grouped the items.")
 
 load_dotenv()
+logging.getLogger("polars").setLevel(logging.ERROR)
 logger = logging.getLogger("pim_interactive")
 logger.setLevel(logging.INFO)
 if not logger.handlers:
