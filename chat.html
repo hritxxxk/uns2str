@@ -802,11 +802,7 @@ async function consumeSSE(response, isStart) {
           case 'complete':
             if (isStart) state.threadId = evt.thread_id;
             if (!bubble) bubble = createBubble();
-            // Replace any temporary progress content with the final message
-            const cel = bubble.querySelector('.msg-content');
-            cel.innerHTML = '';
-            if (evt.message) cel.textContent = evt.message;
-            finalizeBubble(bubble, evt.generated_files);
+            finalizeBubble(bubble, evt.generated_files, evt.message);
             state.turnCount++;
             setStatus('ready');
             saveSession('active');
@@ -908,7 +904,7 @@ function addUserMsg(text) {
   div.innerHTML = `
     <div class="msg-header">
       <div class="msg-avatar you">U</div>
-      <span class="msg-author">You</span>
+      <span class="msg-author"></span>
       <span class="msg-time">${timeStr()}</span>
     </div>
     <div class="msg-content">${md(text)}</div>`;
@@ -922,8 +918,8 @@ function createBubble() {
   div.className = 'msg';
   div.innerHTML = `
     <div class="msg-header">
-      <div class="msg-avatar ai">AI</div>
-      <span class="msg-author">PIM Agent</span>
+      <div class="msg-avatar ai"></div>
+      <span class="msg-author"></span>
       <span class="msg-time">${timeStr()}</span>
     </div>
     <div class="msg-content streaming-cursor"></div>`;
@@ -953,10 +949,10 @@ function addToolLine(bubble, tool, status, detail) {
   scrollBottom();
 }
 
-function finalizeBubble(bubble, files) {
+function finalizeBubble(bubble, files, message) {
   const content = bubble.querySelector('.msg-content');
   content.classList.remove('streaming-cursor');
-  const raw = content.innerText || content.textContent;
+  const raw = message || content.innerText || content.textContent;
   content.innerHTML = md(raw);
 
   if (files && files.length) {
