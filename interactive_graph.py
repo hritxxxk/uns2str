@@ -2364,8 +2364,22 @@ def render_templates(
     profiles_list = state.get("profile_data", {}).get("profiles", [])
     refs = extract_reference_values.invoke({"mappings": mapping_dicts, "profiles": profiles_list})
 
+    # Apply variant rules if configured
+    variant_rule = state.get("variant_rule")
+    src_path = state["file_path"]
+    if variant_rule and variant_rule.get("variants_present"):
+        from helpers_data_plane import execute_variant_rules_polars
+        enriched = src_path.replace(".xlsx", "_enriched.csv").replace(".csv", "_enriched.csv")
+        execute_variant_rules_polars(
+            source_path=src_path,
+            invariants=variant_rule.get("invariant_keys", []),
+            variants=variant_rule.get("variant_keys", []),
+            output_path=enriched,
+        )
+        src_path = enriched
+
     # Read all data rows
-    rows = read_file(state["file_path"], state.get("sheet_name"))
+    rows = read_file(src_path, state.get("sheet_name"))
     hr = state.get("profile_data", {}).get("header_row", 0)
     dr = max(state.get("profile_data", {}).get("data_start_row", hr + 1), hr + 1)
     for _ in range(dr):
@@ -2409,6 +2423,41 @@ def render_templates(
                 f"✅ Generated **{len(files)}** PIM template files:\n\n{file_list}\n\n"
                 f"They're saved to the output directory and ready to download."
             ), tool_call_id=tool_call_id)],
+        },
+    )
+
+
+@tool
+def edit_categories(
+    state: Annotated[dict, InjectedState()],
+    tool_call_id: Annotated[str, InjectedToolCallId],
+    paths: list[str],
+) -> Command:
+    """Save edited category paths to state. Call this when the user asks to modify category names.
+    Provide the FULL list of cleaned category paths.
+
+    Args:
+        paths: The complete list of category paths after user edits.
+    """
+    return Command(
+        update={
+            "profile_data": {
+                **state.get("profile_data", {}),
+                "category_hierarchy": paths,
+            },
+            "categories": PhaseOutput(
+                explanation="Categories updated per user request.",
+                reasoning="User-specified category path edits.",
+                suggestions=[{"type": "item", "label": p, "confidence": 100, "reasoning": "User edit"} for p in paths],
+                approved=True,
+                user_feedback="",
+            ),
+            "messages": [
+                ToolMessage(
+                    content=f"Saved {len(paths)} edited category paths.",
+                    tool_call_id=tool_call_id,
+                )
+            ],
         },
     )
 
@@ -2481,6 +2530,7 @@ AGENT_SYSTEM_PROMPT = """You are VinGPT, a PIM data onboarding assistant. Guide 
 8. merge_duplicates → merge_duplicates (if user asks to find/merge near-duplicates)
 9. merge_sheets → merge_sheets_programmatically (if file has multiple sheets to join)
 10. variants → analyze_and_configure_variants (before render, if product has sizes/colors)
+11. edit_categories → edit_categories (to save user-requested category edits to state)
 
 Do NOT skip ahead. If a milestone isn't in completed_phases, run it next.
 
@@ -2552,7 +2602,7 @@ def agent_reason_node(state: InteractiveIngestionState) -> dict:
     lc_messages = [SystemMessage(content=AGENT_SYSTEM_PROMPT)] + lc_messages
 
     # Build the agent LLM with tools bound
-    agent_tools = [profile_file, extract_categories, map_attributes, extract_references, build_products, render_templates, enrich_descriptions, merge_duplicates, merge_sheets_programmatically, analyze_and_configure_variants]
+    agent_tools = [profile_file, extract_categories, map_attributes, extract_references, build_products, render_templates, enrich_descriptions, merge_duplicates, merge_sheets_programmatically, analyze_and_configure_variants, edit_categories]
     llm = ChatGoogleGenerativeAI(
         model="gemini-2.5-flash",
         temperature=1.0,
@@ -2612,7 +2662,7 @@ def route_start(state: InteractiveIngestionState) -> str:
 builder = StateGraph(InteractiveIngestionState)
 
 # Register tools with ToolNode
-agent_tools = [profile_file, extract_categories, map_attributes, extract_references, build_products, render_templates, enrich_descriptions, merge_duplicates, merge_sheets_programmatically, analyze_and_configure_variants]
+agent_tools = [profile_file, extract_categories, map_attributes, extract_references, build_products, render_templates, enrich_descriptions, merge_duplicates, merge_sheets_programmatically, analyze_and_configure_variants, edit_categories]
 tool_node = ToolNode(agent_tools)
 
 builder.add_node("triage", triage_interactive)

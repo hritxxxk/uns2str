@@ -20,12 +20,23 @@ def _detect_sheet(path, preferred=None):
         return 0
 
 
+def _lazy_or_read(path):
+    """Return a LazyFrame regardless of file format (CSV or xlsx)."""
+    if path.endswith(".csv"):
+        return pl.scan_csv(path)
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        df = pl.read_excel(path, engine="calamine", has_header=True)
+    return df.lazy()
+
+
 def get_variance_sample_polars(source_path: str, title_col: str, limit: int = 5) -> list[dict]:
     """
     Stage 1 & 2: Identifies a candidate block of similar products without OOM.
     Groups by the first 2 words of the product title to simulate LSH blocking.
     """
-    lf = pl.scan_csv(source_path)
+    lf = _lazy_or_read(source_path)
 
     if title_col not in lf.collect_schema().names():
         return []
@@ -54,7 +65,7 @@ def execute_variant_rules_polars(source_path: str, invariants: list[str], varian
     """
     Executes the LLM-calibrated invariant/variant rules over 1,000,000 rows.
     """
-    lf = pl.scan_csv(source_path)
+    lf = _lazy_or_read(source_path)
 
     valid_invariants = [col for col in invariants if col in lf.collect_schema().names()]
 
