@@ -2495,7 +2495,7 @@ def analyze_and_configure_variants(
     )
 
     from langchain_google_genai import ChatGoogleGenerativeAI
-    variant_llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.2)
+    variant_llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash-lite", temperature=0.2)
     structured_llm = variant_llm.with_structured_output(VariantRule)
 
     rule: VariantRule = structured_llm.invoke([
@@ -2604,7 +2604,7 @@ def agent_reason_node(state: InteractiveIngestionState) -> dict:
     # Build the agent LLM with tools bound
     agent_tools = [profile_file, extract_categories, map_attributes, extract_references, build_products, render_templates, enrich_descriptions, merge_duplicates, merge_sheets_programmatically, analyze_and_configure_variants, edit_categories]
     llm = ChatGoogleGenerativeAI(
-        model="gemini-2.5-flash",
+        model="gemini-2.5-flash-lite",
         temperature=1.0,
     ).bind_tools(agent_tools)
 
